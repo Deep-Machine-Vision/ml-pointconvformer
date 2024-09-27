@@ -1,3 +1,4 @@
+
 # PConv CUDA Kernel:
 # For licensing see accompanying LICENSE file.
 #
@@ -10,7 +11,7 @@ setup(
     author='Stefan Lee, Skand',
     description='Faster PointConv CUDA Kernel',
     ext_modules=[
-        CUDAExtension('pconv_cuda', [
+        CUDAExtension('faster_pconv_cuda', [
             'faster_pconv_cuda.cpp',
             'faster_pconv_kernel.cu',
         ], extra_compile_args={'nvcc': ['-L/usr/local/cuda/lib64 -lcudadevrt -lcudart']})
