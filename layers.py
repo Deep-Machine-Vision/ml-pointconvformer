@@ -681,8 +681,8 @@ class PointConvStridePE(nn.Module):
 
         weights = self.weightnet(weightNetInput)
 
-        # if self.cfg.USE_CUDA_KERNEL: #first modification
-        if True:
+        if self.cfg.USE_CUDA_KERNEL: #first modification
+        # if True:
             feats_x = feats_x.contiguous()
             nei_inds = nei_inds.contiguous()
             weights = weights.contiguous()
