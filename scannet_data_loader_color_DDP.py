@@ -3,7 +3,7 @@
 # Copyright (C) 2022-2023 Apple Inc. All Rights Reserved.
 #
 # Data Loader for ScanNet
-
+import pdb
 import random
 import torch
 import numpy as np
@@ -13,7 +13,7 @@ import transforms as t
 from util.voxelize import voxelize
 
 from datasetCommon import subsample_and_knn, compute_weight, collect_fn
-
+from util.Fpconv_util import round_matrix
 
 class ScanNetDataset(Dataset):
     def __init__(self, cfg, dataset="training", rotate_deg=0.0, rotate_aug=False, flip_aug=False, scale_aug=False, transform_aug=False, color_aug=False, crop=False, shuffle_index=False, mix3D=False, voxelize_mode='random'):
@@ -65,6 +65,7 @@ class ScanNetDataset(Dataset):
         for x in torch.utils.data.DataLoader(
                 data_files,
                 collate_fn=lambda x: torch.load(x[0]), num_workers=cfg.NUM_WORKERS):
+            # breakpoint() #dig into this 
             self.data.append(x)
 
         print('%s examples: %d' % (self.set, len(self.data)))
@@ -165,10 +166,7 @@ class ScanNetDataset(Dataset):
         return self.data[indx][3]
 
     def __getitem__(self, indx):
-        coord, features, label, _ = self.data[indx]
-
-        color, norm = features[:, :3], features[:, 3:]
-
+        coord, color, label, norm = self.data[indx]
         # move z to 0+
         z_min = coord[:, 2].min()
         coord[:, 2] -= z_min 
@@ -191,9 +189,9 @@ class ScanNetDataset(Dataset):
         # Mix3D augmentation from 3DV 2021 paper
         if self.mix3D and random.random() < 0.8:
             mix_idx = np.random.randint(len(self.data))
-            coords2, features2, labels2, _ = self.data[mix_idx]
+            coords2, color2, labels2, norm2 = self.data[mix_idx]
 
-            color2, norm2 = features2[:, :3], features2[:, 3:]
+            # color2, norm2 = features2[:, :3], features2[:, 3:]
             z_min = coords2[:, 2].min()
             coords2[:, 2] -= z_min
             coords2, color2, norm2, labels2 = self._augment_data(coords2, color2, norm2, labels2)
@@ -221,6 +219,10 @@ class ScanNetDataset(Dataset):
                 point_list, nei_forward_list, nei_propagate_list, nei_self_list, norm_list \
                     = subsample_and_knn(coord_part, norm_part, grid_size=self.cfg.grid_size, K_self=self.cfg.K_self,
                                         K_forward=self.cfg.K_forward, K_propagate=self.cfg.K_propagate)
+                
+                
+                # currently here I'm not cumputing roundmatrix will do it in next iteration
+                
                 data['point_list'] = point_list
                 data['nei_forward_list'] = nei_forward_list
                 data['nei_propagate_list'] = nei_propagate_list
@@ -229,6 +231,9 @@ class ScanNetDataset(Dataset):
                 data['feature_list'] = [color[crop_idx].astype(np.float32)]
                 data['label_list'] = [label[crop_idx].astype(np.int32)]
                 data['crop_idx'] = crop_idx
+                # data['inv_neighbors'] = inv_neighbors
+                # data['inv_k'] = inv_k
+                # data['inv_idx'] = inv_idx
                 all_data.append(data)
             return all_data
 
@@ -249,6 +254,9 @@ class ScanNetDataset(Dataset):
         point_list, nei_forward_list, nei_propagate_list, nei_self_list, norm_list = \
             subsample_and_knn(coord, norm, grid_size=self.cfg.grid_size, K_self=self.cfg.K_self,
                               K_forward=self.cfg.K_forward, K_propagate=self.cfg.K_propagate)
+
+        inv_neighbors, inv_k, inv_idx = round_matrix(nei_self_list, point_list)
+        
         all_data['point_list'] = point_list
         all_data['nei_forward_list'] = nei_forward_list
         all_data['nei_propagate_list'] = nei_propagate_list
@@ -256,7 +264,10 @@ class ScanNetDataset(Dataset):
         all_data['surface_normal_list'] = norm_list
         all_data['feature_list'] = [color.astype(np.float32)]
         all_data['label_list'] = [label.astype(np.int32)]
-
+        all_data['inv_neighbors'] = inv_neighbors
+        all_data['inv_k'] = inv_k
+        all_data['inv_idx'] = inv_idx
+        
         return all_data
 
 
@@ -319,3 +330,159 @@ def getdataLoaders(cfg, sampler):
                                                   pin_memory=True)
 
     return train_data_loader, val_data_loader, training_dataset, validation_dataset
+
+# def createInverse(neighborMat, inp_points):
+#     N = inp_points  # Total number of points
+#     K = neighborMat.shape[1]  # Number of neighbors per point
+
+#     # Step 1: Count the number of neighbors for each point
+#     neigh_counts = torch.zeros(N, dtype=torch.int64, device=neighborMat.device)
+
+#     for r in range(neighborMat.shape[0]):
+#         for c in range(K):
+#             neigh_counts[neighborMat[r, c]] += 1
+
+#     # Step 2: Pre-allocate tensors based on counts
+#     total_neighbors = neigh_counts.sum().item()
+#     neighbors = torch.zeros(total_neighbors, dtype=torch.int64, device=neighborMat.device)
+#     inv_k = torch.zeros(total_neighbors, dtype=torch.int64, device=neighborMat.device)
+#     idx = torch.zeros(N + 1, dtype=torch.int64, device=neighborMat.device)
+
+#     # Create a cumulative sum for indexing
+#     idx[1:] = torch.cumsum(neigh_counts, dim=0)
+
+#     # Step 3: Fill in the neighbors and inverse indices
+#     current_pos = torch.zeros(N, dtype=torch.int64, device=neighborMat.device)
+
+#     for r in range(neighborMat.shape[0]):
+#         for c in range(K):
+#             point = neighborMat[r, c]
+#             insert_pos = idx[point] + current_pos[point]
+#             neighbors[insert_pos] = r
+#             inv_k[insert_pos] = c
+#             current_pos[point] += 1
+
+#     return neighbors, inv_k, idx
+
+
+# def round_matrix(neighbor_inds, inp_points):
+#     # Pre-allocate tensors for batched results
+#     ineigh = []
+#     ik = []
+#     iidx = []
+    
+#     for b in range(B):
+#         # Call createInverse to process each batch
+#         inv_neighbors, inv_k, inv_idx = createInverse(neighbor_inds[b], inp_points)
+#         ineigh.append(inv_neighbors.unsqueeze(0))
+#         ik.append(inv_k.unsqueeze(0))
+#         iidx.append(inv_idx.unsqueeze(0))
+
+#     # Stack tensors instead of list operations
+#     inv_neighbors = torch.cat(ineigh, dim=0).cuda()
+#     inv_k = torch.cat(ik, dim=0).cuda()
+#     inv_idx = torch.cat(iidx, dim=0).cuda()
+
+#     return inv_neighbors, inv_k, inv_idx
+
+
+# def round_matrix(neighbor_inds, inp_points, B):
+#     # create round matrix
+#     ineigh = []
+#     ik = []
+#     iidx = []
+#     for b in range(B):
+#         inv_neighbors, inv_k, inv_idx = createInverse(neighbor_inds[b], inp_points) 
+#         ineigh.append(torch.from_numpy(inv_neighbors))
+#         ik.append(torch.from_numpy(inv_k))
+#         iidx.append(torch.from_numpy(inv_idx))
+
+#     inv_neighbors = torch.stack(ineigh, dim=0).cuda()
+#     inv_k = torch.stack(ik, dim=0).cuda()
+#     inv_idx = torch.stack(iidx, dim=0).cuda()
+
+#     return inv_neighbors, inv_k, inv_idx
+# def createInverse(neighborMat, inp_points):
+#     """
+#     This function creates an inverse mapping of the neighbors based on the neighbor matrix 
+#     and input points. It ensures that the neighbors are counted, pre-allocated, and indexed 
+#     based on their positions.
+
+#     Arguments:
+#     neighborMat -- Tensor of shape (N, K), where N is the number of points, and K is the number of neighbors
+#     inp_points -- Tensor of shape (N, 3), representing the input points
+
+#     Returns:
+#     neighbors, inv_k, idx -- Inverse neighbor matrix, inverse K index, and cumulative sum index
+#     """
+#     N = inp_points.shape[0]  # Total number of points in this batch
+#     K = neighborMat.shape[1]  # Number of neighbors per point
+
+#     # Step 1: Count the number of neighbors for each point
+#     neigh_counts = torch.zeros(N, dtype=torch.int64, device=neighborMat.device)
+
+#     for r in range(neighborMat.shape[0]):
+#         for c in range(K):
+#             neigh_counts[neighborMat[r, c]] += 1
+
+#     # Step 2: Pre-allocate tensors based on counts
+#     total_neighbors = neigh_counts.sum().item()
+#     neighbors = torch.zeros(total_neighbors, dtype=torch.int64, device=neighborMat.device)
+#     inv_k = torch.zeros(total_neighbors, dtype=torch.int64, device=neighborMat.device)
+#     idx = torch.zeros(N + 1, dtype=torch.int64, device=neighborMat.device)
+
+#     # Create a cumulative sum for indexing
+#     idx[1:] = torch.cumsum(neigh_counts, dim=0)
+
+#     # Step 3: Fill in the neighbors and inverse indices
+#     current_pos = torch.zeros(N, dtype=torch.int64, device=neighborMat.device)
+
+#     for r in range(neighborMat.shape[0]):
+#         for c in range(K):
+#             point = neighborMat[r, c]
+#             insert_pos = idx[point] + current_pos[point]
+#             neighbors[insert_pos] = r
+#             inv_k[insert_pos] = c
+#             current_pos[point] += 1
+
+#     return neighbors, inv_k, idx
+
+
+# def round_matrix(neighbor_inds, inp_points):
+#     """
+#     This function processes batches of neighbor indices and input points and 
+#     computes the inverse mapping using the `createInverse` function.
+
+#     Arguments:
+#     neighbor_inds -- List of Tensors, where each Tensor represents the neighbor indices for one batch
+#     inp_points -- List of Tensors, where each Tensor represents the input points for one batch
+
+#     Returns:
+#     inv_neighbors, inv_k, inv_idx -- Stacked tensors of inverse neighbors, inverse K index, and cumulative sum index
+#     """
+#     B = len(neighbor_inds)  # Batch size, assuming neighbor_inds is a list of tensors
+
+#     # Pre-allocate tensors for batched results
+#     ineigh = []
+#     ik = []
+#     iidx = []
+
+#     for b in range(B):
+#         # Ensure inputs are PyTorch tensors
+#         if isinstance(neighbor_inds[b], np.ndarray):
+#             neighbor_inds[b] = torch.from_numpy(neighbor_inds[b])  # Assuming GPU
+#         if isinstance(inp_points[b], np.ndarray):
+#             inp_points[b] = torch.from_numpy(inp_points[b]) # Assuming GPU
+
+#         # Call createInverse to process each batch
+#         inv_neighbors, inv_k, inv_idx = createInverse(neighbor_inds[b], inp_points[b])
+#         ineigh.append(inv_neighbors.unsqueeze(0))
+#         ik.append(inv_k.unsqueeze(0))
+#         iidx.append(inv_idx.unsqueeze(0))
+
+#     # Stack tensors instead of list operations
+#     inv_neighbors = torch.cat(ineigh, dim=0)
+#     inv_k = torch.cat(ik, dim=0)
+#     inv_idx = torch.cat(iidx, dim=0)
+
+#     return inv_neighbors, inv_k, inv_idx

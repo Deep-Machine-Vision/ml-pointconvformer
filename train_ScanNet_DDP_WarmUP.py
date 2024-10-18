@@ -5,7 +5,7 @@
 
 # Usage: python train_ScanNet_DDP_WarmUP.py --config config_file
 #        example config files can be found in ./configs/
-
+import pdb
 import os
 import time
 import datetime
@@ -30,6 +30,9 @@ from model_architecture import PointConvFormer_Segmentation as VI_PointConv
 from model_architecture import get_default_configs
 import scannet_data_loader_color_DDP as scannet_data_loader
 
+from util.Fpconv_util import round_matrix
+# from cpp_wrappers.cpp_faster_pconv_kernel.test_fasterpconv_encoder import knn
+# from cpp_wrappers.cpp_faster_pconv_kernel.test_fasterpconv_encoder import round_matrix
 
 def get_default_training_cfgs(cfg):
     '''
@@ -177,6 +180,30 @@ def main_worker(config):
         args)
 
     # get model
+    # os.makedirs("precomputed_data", exist_ok=True)
+
+    # for i, data in enumerate(train_data_loader):
+    #     features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
+    
+    #     # Compute the values using round_matrix
+    #     inv_neighbors, inv_k, inv_idx = round_matrix(edges_self, pointclouds)
+
+    #     # Save them to disk (adjust format as needed)
+    #     torch.save((inv_neighbors, inv_k, inv_idx), f"precomputed_data/train_data/precomputed_train_{i}.pt")
+    #     print(f"Precomputed data saved for sample {i}")
+    
+    # for i, data in enumerate(val_data_loader):
+    #     features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
+    
+    #     # Compute the values using round_matrix
+    #     inv_neighbors, inv_k, inv_idx = round_matrix(edges_self, pointclouds)
+
+    #     # Save them to disk (adjust format as needed)
+    #     torch.save((inv_neighbors, inv_k, inv_idx), f"precomputed_data/val_data/precomputed_train_{i}.pt")
+    #     print(f"Precomputed data saved for sample {i}")
+
+    # exit()
+
     model = VI_PointConv(args).to(local_rank)
     if main_process():
         logger.info(model)
@@ -353,6 +380,7 @@ def main_worker(config):
         logger.info('===>Training done!\nBest IoU: %.3f' % (best_iou))
 
 
+
 def train(train_loader, model, criterion, optimizer, epoch, scheduler):
 
     batch_time = AverageMeter()
@@ -370,17 +398,21 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler):
         accum_iter = 1
 
     for i, data in enumerate(train_loader):
-
-        features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
+        
+        features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms, inv_neighbors, inv_k, inv_idx = data
 #        print('maximum points: ', max([feat.shape[0] for feat in features]))
-        features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = to_device(
+        features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms, inv_neighbors, inv_k, inv_idx = to_device(
             features, non_blocking=True), to_device(
             pointclouds, non_blocking=True), to_device(
             edges_self, non_blocking=True), to_device(
                 edges_forward, non_blocking=True), to_device(
                     edges_propagate, non_blocking=True), to_device(
                         target, non_blocking=True), to_device(
-                            norms, non_blocking=True)
+                            norms, non_blocking=True), to_device(
+            inv_neighbors, non_blocking=True), to_device(
+                inv_k, non_blocking=True), to_device(
+                    inv_idx, non_blocking=True)                        
+        
 
         data_time.update(time.time() - end)
         pred = model(
@@ -389,7 +421,10 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler):
             edges_self,
             edges_forward,
             edges_propagate,
-            norms)
+            norms,
+            inv_neighbors,
+            inv_k,
+            inv_idx)
         pred = pred.contiguous().view(-1, args.num_classes)
         target = target.view(-1, 1)[:, 0]
         loss = criterion(pred, target)
@@ -524,11 +559,14 @@ def validate(val_loader, model, criterion):
     end = time.time()
     for i, data in enumerate(val_loader):
 
-        features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
-        features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = \
+        features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms, inv_neighbors, inv_k, inv_idx = data
+        features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms, inv_neighbors, inv_k, inv_idx = \
             to_device(features), to_device(pointclouds), \
             to_device(edges_self), to_device(edges_forward), \
-            to_device(edges_propagate), to_device(target), to_device(norms)
+            to_device(edges_propagate), to_device(target), to_device(norms), to_device(
+            inv_neighbors), to_device(
+                inv_k), to_device(
+                    inv_idx)
 
         data_time.update(time.time() - end)
 
@@ -539,7 +577,10 @@ def validate(val_loader, model, criterion):
                 edges_self,
                 edges_forward,
                 edges_propagate,
-                norms)
+                norms,
+                inv_neighbors,
+                inv_k,
+                inv_idx)
             pred = pred.contiguous().view(-1, args.num_classes)
             target = target.view(-1, 1)[:, 0]
             loss = criterion(pred, target)

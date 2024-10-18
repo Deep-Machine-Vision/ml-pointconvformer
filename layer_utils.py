@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pcf_cuda
+import faster_pconv_cuda
 from util.cp_batchnorm import CpBatchNorm2d
 
 
@@ -261,3 +262,60 @@ class UnaryBlock(nn.Module):
     def __repr__(self):
         return 'UnaryBlock(in_feat: {:d}, out_feat: {:d}, BN: {:s}, ReLU: {:s})'.format(
             self.in_dim, self.out_dim, str(self.use_bn), str(not self.no_relu))
+
+class FasterPConvFunction(torch.autograd.Function):
+    '''
+    Function for the Faster-PointConv CUDA kernel
+    '''
+    @staticmethod
+    def forward(
+            ctx,
+            input_feat,
+            inv_neighbors,
+            inv_k,
+            inv_idx,
+            neighbor_inds,
+            weightnet,
+            additional_features):
+        # Make sure we are not computing gradient on neighbor_inds
+        neighbor_inds.requires_grad = False
+        output = faster_pconv_cuda.pconv_forward(
+            input_feat, neighbor_inds, weightnet, additional_features)
+        ctx.save_for_backward(
+            input_feat,
+            inv_neighbors,
+            inv_k,
+            inv_idx,
+            neighbor_inds,
+            weightnet,
+            additional_features)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_input, grad_weight, grad_additional = faster_pconv_cuda.pconv_backward_opt(
+            grad_output.contiguous(), *ctx.saved_tensors)
+        return grad_input, None, grad_weight, grad_additional, None, None, None
+
+
+class FasterPConv(torch.nn.Module):
+    '''
+    This class uses the CUDA kernel to fuse gather -> matrix multiplication in PointConv which improves speed.
+    Right now, it is numerically correct, but somehow it will mysteriously reduce training accuracy, hence only recommended to use during testing time
+    '''
+
+    def __init__(self):
+        super(FasterPConv, self).__init__()
+
+    @staticmethod
+    def forward(input_features, inv_neighbors, inv_k, inv_idx, neighbor_inds, weightnet, additional_features=None):
+        if additional_features is None:
+            additional_features = torch.zeros(input_features.shape[0], input_features.shape[1], neighbor_inds.shape[2], 0).to(input_features.device)
+        return FasterPConvFunction.apply(
+            input_features,
+            inv_neighbors,
+            inv_k,
+            inv_idx,
+            neighbor_inds,
+            weightnet,
+            additional_features)

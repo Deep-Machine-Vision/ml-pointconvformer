@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from easydict import EasyDict
-from layers import PointConv, PointConvStridePE, PointConvTransposePE, PointTransformerLayer, PCFLayer, Linear_BN
+from layers import PointConv, FasterPointConv, PointConvStridePE, PointConvTransposePE, PointTransformerLayer, PCFLayer, Linear_BN
 
 
 def get_default_configs(cfg, num_level=5, base_dim=64):
@@ -114,6 +114,8 @@ class PCF_Backbone(nn.Module):
         if cfg.use_level_1:
             self.selfpointconv = PointConv(
                 self.input_feat_dim, cfg.base_dim, cfg, weightnet_start)
+            # self.selfpointconv = FasterPointConv(
+            #     self.input_feat_dim, cfg.base_dim, cfg, weightnet_start)
             self.selfpointconv_res1 = PointConvStridePE(
                 cfg.base_dim, cfg.base_dim, cfg, weightnet_start)
             self.selfpointconv_res2 = PointConvStridePE(
@@ -172,7 +174,7 @@ class PCF_Backbone(nn.Module):
                                     out_ch, out_ch, cfg.num_heads))
                 self.pointconv_res.append(res_blocks)
 
-    def forward(self, features, pointclouds, edges_self, edges_forward, norms):
+    def forward(self, features, pointclouds, edges_self, edges_forward, norms, inv_neighbors, inv_k, inv_idx):
         # encode pointwise info
         pointwise_feat = torch.cat(
             [features, pointclouds[0]], -1) if self.cfg.USE_XYZ else features
@@ -180,12 +182,15 @@ class PCF_Backbone(nn.Module):
         # level 1 conv, this helps performance significantly on 5cm/10cm inputs
         # but have relatively small use on 2cm
         if self.cfg.use_level_1:
+            # breakpoint()
+            # pointwise_feat, vi_features = self.selfpointconv(
+            #     pointclouds[0], pointwise_feat, edges_self[0], norms[0], inv_neighbors=inv_neighbors[0], inv_k=inv_k[0], inv_idx=inv_idx[0])
             pointwise_feat, vi_features = self.selfpointconv(
                 pointclouds[0], pointwise_feat, edges_self[0], norms[0])
             pointwise_feat, _ = self.selfpointconv_res1(
-                pointclouds[0], pointwise_feat, edges_self[0], norms[0], vi_features=vi_features)
+                pointclouds[0], pointwise_feat, edges_self[0], norms[0], vi_features=vi_features, inv_neighbors=inv_neighbors[0], inv_k=inv_k[0], inv_idx=inv_idx[0])
             pointwise_feat, _ = self.selfpointconv_res2(
-                pointclouds[0], pointwise_feat, edges_self[0], norms[0], vi_features=vi_features)
+                pointclouds[0], pointwise_feat, edges_self[0], norms[0], vi_features=vi_features,inv_neighbors=inv_neighbors[0], inv_k=inv_k[0], inv_idx=inv_idx[0])
         else:
             # if don't use level 1 convs, then just simply do a linear layer to
             # increase the feature dimensionality
@@ -210,10 +215,10 @@ class PCF_Backbone(nn.Module):
                 else:
                     if vi_features is not None:
                         sparse_feat, _ = res_block(
-                            pointclouds[i + 1], sparse_feat, edges_self[i + 1], norms[i + 1], vi_features=vi_features)
+                            pointclouds[i + 1], sparse_feat, edges_self[i + 1], norms[i + 1], vi_features=vi_features, inv_neighbors=inv_neighbors[i + 1], inv_k=inv_k[i+1],inv_idx=inv_idx[i+1])
                     else:
                         sparse_feat, vi_features = res_block(
-                            pointclouds[i + 1], sparse_feat, edges_self[i + 1], norms[i + 1])
+                            pointclouds[i + 1], sparse_feat, edges_self[i + 1], norms[i + 1], inv_neighbors=inv_neighbors[i + 1], inv_k=inv_k[i+1],inv_idx=inv_idx[i+1])
 
             feat_list.append(sparse_feat)
 
@@ -385,13 +390,19 @@ class PointConvFormer_Segmentation(nn.Module):
             edges_self,
             edges_forward,
             edges_propagate,
-            norms):
+            norms,
+            inv_neighbors,
+            inv_k,
+            inv_idx):
         feat_list = self.pcf_backbone(
             features,
             pointclouds,
             edges_self,
             edges_forward,
-            norms)
+            norms,
+            inv_neighbors,
+            inv_k,
+            inv_idx)
 
         sparse_feat = feat_list[-1]
         for i, pointdeconv in enumerate(self.pointdeconv):
@@ -400,15 +411,15 @@ class PointConvFormer_Segmentation(nn.Module):
             sparse_feat, _ = pointdeconv(pointclouds[cur_level +
                                                      1], sparse_feat, edges_propagate[cur_level], norms[cur_level +
                                                                                                         1], pointclouds[cur_level], norms[cur_level], feat_list[cur_level])
-
+            # breakpoint()
             vi_features = None
             for res_block in self.pointdeconv_res[i]:
                 if vi_features is not None:
                     sparse_feat, _ = res_block(
-                        pointclouds[cur_level], sparse_feat, edges_self[cur_level], norms[cur_level], vi_features=vi_features)
+                        pointclouds[cur_level], sparse_feat, edges_self[cur_level], norms[cur_level], vi_features=vi_features, inv_neighbors=inv_neighbors[cur_level], inv_k=inv_k[cur_level], inv_idx=inv_idx[cur_level])
                 else:
                     sparse_feat, vi_features = res_block(
-                        pointclouds[cur_level], sparse_feat, edges_self[cur_level], norms[cur_level])
+                        pointclouds[cur_level], sparse_feat, edges_self[cur_level], norms[cur_level],inv_neighbors=inv_neighbors[cur_level], inv_k=inv_k[cur_level], inv_idx=inv_idx[cur_level])
 
             feat_list[cur_level] = sparse_feat
 

@@ -159,6 +159,170 @@ def crop(points, x_min, y_min, z_min, x_max, y_max, z_max):
     return inds
 
 
+# def tensorizeList(nplist, is_index=False):
+#     """
+#     Make all numpy arrays inside a list into torch tensors
+#     """
+#     ret_list = []
+#     for npitem in nplist:
+#         if is_index:
+#             if npitem is None:
+#                 ret_list.append(None)
+#             else:
+#                 ret_list.append(
+#                     torch.from_numpy(
+#                         npitem).long().unsqueeze(0))
+#         else:
+#             ret_list.append(torch.from_numpy(npitem).float().unsqueeze(0))
+
+#     return ret_list
+
+
+# def tensorize(
+#         features,
+#         pointclouds,
+#         edges_self,
+#         edges_forward,
+#         edges_propagate,
+#         target,
+#         norms):
+#     """
+#     Convert numpy arrays from inside lists into torch tensors for all input data
+#     """
+#     pointclouds = tensorizeList(pointclouds)
+#     norms = tensorizeList(norms)
+#     edges_self = tensorizeList(edges_self, True)
+#     edges_forward = tensorizeList(edges_forward, True)
+#     edges_propagate = tensorizeList(edges_propagate, True)
+
+#     target = torch.from_numpy(target).long().unsqueeze(0)
+#     features = torch.from_numpy(features).float().unsqueeze(0)
+
+#     return features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms
+
+
+# def listToBatch(
+#         features,
+#         pointclouds,
+#         edges_self,
+#         edges_forward,
+#         edges_propagate,
+#         target,
+#         norms):
+#     """
+#     ListToBatch transforms a batch of multiple clouds into one point cloud so that we do not have to pad them to the same length
+#     The way this works is that all point clouds are concatenated one after another e.g., if you have point cloud 1 which is [5154,3], point cloud 2 which is [4749, 3]
+#     then it creates a point cloud as if it has batch size 1, which is a tensor of shape [1, 5154+4749, 3]
+#     It also modifies the edges (indices of k-nearest-neighbors) so that they point to the correct points
+#     For example, for point cloud 2, we add 5154 to all its neighbor indices so that they
+#     link to the points in point cloud 2 in this combined tensor
+#     Input: List versions of all the input
+#     Output: Batched versions of all the input
+#     """
+#     # import ipdb; ipdb.set_trace()
+#     num_sample = len(pointclouds)
+
+#     # process sample 0
+#     featureBatch = features[0][0]
+#     pointcloudsBatch = pointclouds[0]
+#     pointcloudsNormsBatch = norms[0]
+#     if target:
+#         targetBatch = target[0][0]
+#     else:
+#         targetBatch = np.array(0)
+
+#     edgesSelfBatch = edges_self[0]
+#     edgesForwardBatch = edges_forward[0]
+#     edgesPropagateBatch = edges_propagate[0]
+
+#     points_stored = [val.shape[0] for val in pointcloudsBatch]
+
+#     for i in range(1, num_sample):
+#         if target:
+#             targetBatch = np.concatenate([targetBatch, target[i][0]], 0)
+#         featureBatch = np.concatenate([featureBatch, features[i][0]], 0)
+
+#         for j in range(len(edges_forward[i])):
+#             tempMask = edges_forward[i][j] == -1
+#             edges_forwardAdd = edges_forward[i][j] + points_stored[j]
+#             edges_forwardAdd[tempMask] = -1
+#             edgesForwardBatch[j] = np.concatenate([edgesForwardBatch[j],
+#                                                    edges_forwardAdd], 0)
+
+#             tempMask2 = edges_propagate[i][j] == -1
+#             edges_propagateAdd = edges_propagate[i][j] + points_stored[j + 1]
+#             edges_propagateAdd[tempMask2] = -1
+#             edgesPropagateBatch[j] = np.concatenate([edgesPropagateBatch[j],
+#                                                      edges_propagateAdd], 0)
+
+#         for j in range(len(pointclouds[i])):
+#             tempMask3 = edges_self[i][j] == -1
+#             edges_selfAdd = edges_self[i][j] + points_stored[j]
+#             edges_selfAdd[tempMask3] = -1
+#             edgesSelfBatch[j] = np.concatenate([edgesSelfBatch[j],
+#                                                 edges_selfAdd], 0)
+
+#             pointcloudsBatch[j] = np.concatenate(
+#                 [pointcloudsBatch[j], pointclouds[i][j]], 0)
+#             pointcloudsNormsBatch[j] = np.concatenate(
+#                 [pointcloudsNormsBatch[j], norms[i][j]], 0)
+
+#             points_stored[j] += pointclouds[i][j].shape[0]
+
+#     return featureBatch, pointcloudsBatch, edgesSelfBatch, edgesForwardBatch, edgesPropagateBatch, \
+#         targetBatch, pointcloudsNormsBatch
+
+
+# def prepare(
+#         features,
+#         pointclouds,
+#         edges_self,
+#         edges_forward,
+#         edges_propagate,
+#         target,
+#         norms):
+#     """
+#     Prepare data coming from data loader (lists of numpy arrays) into torch tensors ready to send to training
+#     """
+
+#     features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out = [], [], [], [], [], [], []
+
+#     features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out = \
+#         listToBatch(features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms)
+
+#     features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out = \
+#         tensorize(features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out)
+
+#     return features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out
+
+
+# def collect_fn(data_list):
+#     """
+#     collect data from the data dictionary and outputs pytorch tensors
+#     """
+#     features = []
+#     pointclouds = []
+#     target = []
+#     norms = []
+#     edges_forward = []
+#     edges_propagate = []
+#     edges_self = []
+    
+#     for i, data in enumerate(data_list):
+#         features.append(data['feature_list'])
+#         pointclouds.append(data['point_list'])
+#         if 'label_list' in data.keys():
+#             target.append(data['label_list'])
+#         norms.append(data['surface_normal_list'])
+
+#         edges_forward.append(data['nei_forward_list'])
+#         edges_propagate.append(data['nei_propagate_list'])
+#         edges_self.append(data['nei_self_list'])
+
+#     features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = \
+#         prepare(features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms)
+
+#     return features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms
 def tensorizeList(nplist, is_index=False):
     """
     Make all numpy arrays inside a list into torch tensors
@@ -177,7 +341,6 @@ def tensorizeList(nplist, is_index=False):
 
     return ret_list
 
-
 def tensorize(
         features,
         pointclouds,
@@ -185,22 +348,110 @@ def tensorize(
         edges_forward,
         edges_propagate,
         target,
-        norms):
+        norms,
+        inv_neighbors,
+        inv_k,
+        inv_idx):
     """
-    Convert numpy arrays from inside lists into torch tensors for all input data
+    ListToBatch transforms a batch of multiple clouds into one point cloud so that we do not have to pad them to the same length
+#     The way this works is that all point clouds are concatenated one after another e.g., if you have point cloud 1 which is [5154,3], point cloud 2 which is [4749, 3]
+#     then it creates a point cloud as if it has batch size 1, which is a tensor of shape [1, 5154+4749, 3]
+#     It also modifies the edges (indices of k-nearest-neighbors) so that they point to the correct points
+#     For example, for point cloud 2, we add 5154 to all its neighbor indices so that they
+#     link to the points in point cloud 2 in this combined tensor
+#     Input: List versions of all the input
+#     Output: Batched versions of all the input
     """
     pointclouds = tensorizeList(pointclouds)
     norms = tensorizeList(norms)
     edges_self = tensorizeList(edges_self, True)
     edges_forward = tensorizeList(edges_forward, True)
     edges_propagate = tensorizeList(edges_propagate, True)
+    
+    inv_neighbors = tensorizeList(inv_neighbors, True)
+    inv_k = tensorizeList(inv_k, True)
+    inv_idx = tensorizeList(inv_idx, True)
 
     target = torch.from_numpy(target).long().unsqueeze(0)
     features = torch.from_numpy(features).float().unsqueeze(0)
 
-    return features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms
+    return features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms, inv_neighbors, inv_k, inv_idx
 
+#  def listToBatch(
+#         features,
+#         pointclouds,
+#         edges_self,
+#         edges_forward,
+#         edges_propagate,
+#         target,
+#         norms,
+#         inv_neighbors,
+#         inv_k,
+#         inv_idx):
+#     """
+#     ListToBatch transforms a batch of multiple clouds into one point cloud so that we do not have to pad them to the same length.
+#     This function has been updated to also handle inv_neighbors, inv_k, and inv_idx.
+#     """
+#     num_sample = len(pointclouds)
 
+#     # process sample 0
+#     featureBatch = features[0][0]
+#     pointcloudsBatch = pointclouds[0]
+#     pointcloudsNormsBatch = norms[0]
+#     if target:
+#         targetBatch = target[0][0]
+#     else:
+#         targetBatch = np.array(0)
+
+#     edgesSelfBatch = edges_self[0]
+#     edgesForwardBatch = edges_forward[0]
+#     edgesPropagateBatch = edges_propagate[0]
+
+#     invNeighborsBatch = inv_neighbors[0]
+#     invKBatch = inv_k[0]
+#     invIdxBatch = inv_idx[0]
+
+#     points_stored = [val.shape[0] for val in pointcloudsBatch]
+
+#     for i in range(1, num_sample):
+#         if target:
+#             targetBatch = np.concatenate([targetBatch, target[i][0]], 0)
+#         featureBatch = np.concatenate([featureBatch, features[i][0]], 0)
+
+#         for j in range(len(edges_forward[i])):
+#             tempMask = edges_forward[i][j] == -1
+#             edges_forwardAdd = edges_forward[i][j] + points_stored[j]
+#             edges_forwardAdd[tempMask] = -1
+#             edgesForwardBatch[j] = np.concatenate([edgesForwardBatch[j],
+#                                                    edges_forwardAdd], 0)
+
+#             tempMask2 = edges_propagate[i][j] == -1
+#             edges_propagateAdd = edges_propagate[i][j] + points_stored[j + 1]
+#             edges_propagateAdd[tempMask2] = -1
+#             edgesPropagateBatch[j] = np.concatenate([edgesPropagateBatch[j],
+#                                                      edges_propagateAdd], 0)
+
+#         for j in range(len(pointclouds[i])):
+#             tempMask3 = edges_self[i][j] == -1
+#             edges_selfAdd = edges_self[i][j] + points_stored[j]
+#             edges_selfAdd[tempMask3] = -1
+#             edgesSelfBatch[j] = np.concatenate([edgesSelfBatch[j],
+#                                                 edges_selfAdd], 0)
+
+#             pointcloudsBatch[j] = np.concatenate(
+#                 [pointcloudsBatch[j], pointclouds[i][j]], 0)
+#             pointcloudsNormsBatch[j] = np.concatenate(
+#                 [pointcloudsNormsBatch[j], norms[i][j]], 0)
+
+#             points_stored[j] += pointclouds[i][j].shape[0]
+
+#         # Directly concatenate inv_neighbors, inv_k, inv_idx
+#         invNeighborsBatch = np.concatenate([invNeighborsBatch, inv_neighbors[i]], 0)
+#         invKBatch = np.concatenate([invKBatch, inv_k[i]], 0)
+#         invIdxBatch = np.concatenate([invIdxBatch, inv_idx[i] + points_stored[0]], 0) 
+
+#     return featureBatch, pointcloudsBatch, edgesSelfBatch, edgesForwardBatch, edgesPropagateBatch, \
+#         targetBatch, pointcloudsNormsBatch, invNeighborsBatch, invKBatch, invIdxBatch
 def listToBatch(
         features,
         pointclouds,
@@ -208,18 +459,14 @@ def listToBatch(
         edges_forward,
         edges_propagate,
         target,
-        norms):
+        norms,
+        inv_neighbors,
+        inv_k,
+        inv_idx):
     """
-    ListToBatch transforms a batch of multiple clouds into one point cloud so that we do not have to pad them to the same length
-    The way this works is that all point clouds are concatenated one after another e.g., if you have point cloud 1 which is [5154,3], point cloud 2 which is [4749, 3]
-    then it creates a point cloud as if it has batch size 1, which is a tensor of shape [1, 5154+4749, 3]
-    It also modifies the edges (indices of k-nearest-neighbors) so that they point to the correct points
-    For example, for point cloud 2, we add 5154 to all its neighbor indices so that they
-    link to the points in point cloud 2 in this combined tensor
-    Input: List versions of all the input
-    Output: Batched versions of all the input
+    ListToBatch transforms a batch of multiple clouds into one point cloud so that we do not have to pad them to the same length.
+    This function has been updated to also handle inv_neighbors, inv_k, and inv_idx.
     """
-    # import ipdb; ipdb.set_trace()
     num_sample = len(pointclouds)
 
     # process sample 0
@@ -235,7 +482,12 @@ def listToBatch(
     edgesForwardBatch = edges_forward[0]
     edgesPropagateBatch = edges_propagate[0]
 
+    invNeighborsBatch = inv_neighbors[0]
+    invKBatch = inv_k[0]
+    invIdxBatch = inv_idx[0]
+
     points_stored = [val.shape[0] for val in pointcloudsBatch]
+    # cumulative_points = 0
 
     for i in range(1, num_sample):
         if target:
@@ -269,8 +521,13 @@ def listToBatch(
 
             points_stored[j] += pointclouds[i][j].shape[0]
 
+            invNeighborsBatch[j] = np.concatenate([invNeighborsBatch[j], inv_neighbors[i][j]], 0)
+            invKBatch[j] = np.concatenate([invKBatch[j], inv_k[i][j]], 0)
+            invIdxBatch[j] = np.concatenate([invIdxBatch[j], inv_idx[i][j]], 0)
+            
+
     return featureBatch, pointcloudsBatch, edgesSelfBatch, edgesForwardBatch, edgesPropagateBatch, \
-        targetBatch, pointcloudsNormsBatch
+        targetBatch, pointcloudsNormsBatch, invNeighborsBatch, invKBatch, invIdxBatch
 
 
 def prepare(
@@ -280,25 +537,25 @@ def prepare(
         edges_forward,
         edges_propagate,
         target,
-        norms):
+        norms,
+        inv_neighbors,
+        inv_k,
+        inv_idx):
     """
     Prepare data coming from data loader (lists of numpy arrays) into torch tensors ready to send to training
     """
 
-    features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out = [], [], [], [], [], [], []
+    features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out, inv_neighbors_out, inv_k_out, inv_idx_out = \
+        listToBatch(features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms, inv_neighbors, inv_k, inv_idx)
 
-    features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out = \
-        listToBatch(features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms)
+    features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out, inv_neighbors_out, inv_k_out, inv_idx_out = \
+        tensorize(features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out, inv_neighbors_out, inv_k_out, inv_idx_out)
 
-    features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out = \
-        tensorize(features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out)
-
-    return features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out
-
+    return features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out, inv_neighbors_out, inv_k_out, inv_idx_out
 
 def collect_fn(data_list):
     """
-    collect data from the data dictionary and outputs pytorch tensors
+    collect data from the data dictionary and outputs pytorch tensors, updated to handle inv_neighbors, inv_k, inv_idx
     """
     features = []
     pointclouds = []
@@ -307,6 +564,10 @@ def collect_fn(data_list):
     edges_forward = []
     edges_propagate = []
     edges_self = []
+    inv_neighbors = []
+    inv_k = []
+    inv_idx = []
+    
     for i, data in enumerate(data_list):
         features.append(data['feature_list'])
         pointclouds.append(data['point_list'])
@@ -318,10 +579,15 @@ def collect_fn(data_list):
         edges_propagate.append(data['nei_propagate_list'])
         edges_self.append(data['nei_self_list'])
 
-    features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = \
-        prepare(features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms)
+        # Collect inv_neighbors, inv_k, inv_idx
+        inv_neighbors.append(data['inv_neighbors'])
+        inv_k.append(data['inv_k'])
+        inv_idx.append(data['inv_idx'])
 
-    return features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms
+    features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms, inv_neighbors, inv_k, inv_idx = \
+        prepare(features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms, inv_neighbors, inv_k, inv_idx)
+
+    return features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms, inv_neighbors, inv_k, inv_idx
 
 
 def subsample_and_knn(
