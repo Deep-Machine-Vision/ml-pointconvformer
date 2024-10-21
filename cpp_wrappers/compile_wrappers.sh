@@ -10,3 +10,6 @@ cd ../
 cd cpp_pcf_kernel
 python3 setup.py install
 cd ../
+cd cpp_faster_pconv_kernel
+python3 setup.py install
+cd ../

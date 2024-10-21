@@ -180,30 +180,6 @@ def main_worker(config):
         args)
 
     # get model
-    # os.makedirs("precomputed_data", exist_ok=True)
-
-    # for i, data in enumerate(train_data_loader):
-    #     features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
-    
-    #     # Compute the values using round_matrix
-    #     inv_neighbors, inv_k, inv_idx = round_matrix(edges_self, pointclouds)
-
-    #     # Save them to disk (adjust format as needed)
-    #     torch.save((inv_neighbors, inv_k, inv_idx), f"precomputed_data/train_data/precomputed_train_{i}.pt")
-    #     print(f"Precomputed data saved for sample {i}")
-    
-    # for i, data in enumerate(val_data_loader):
-    #     features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
-    
-    #     # Compute the values using round_matrix
-    #     inv_neighbors, inv_k, inv_idx = round_matrix(edges_self, pointclouds)
-
-    #     # Save them to disk (adjust format as needed)
-    #     torch.save((inv_neighbors, inv_k, inv_idx), f"precomputed_data/val_data/precomputed_train_{i}.pt")
-    #     print(f"Precomputed data saved for sample {i}")
-
-    # exit()
-
     model = VI_PointConv(args).to(local_rank)
     if main_process():
         logger.info(model)
