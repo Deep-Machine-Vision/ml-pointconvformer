@@ -377,7 +377,7 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler):
                 pointclouds, non_blocking=True), to_device(
                     target, non_blocking=True), to_device(norms, non_blocking=True)
         
-        edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored)
+        edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored, args.K_self, args.K_forward, args.K_propagate)
         edges_self, edges_forward, edges_propagate = prepare(edges_self, edges_forward, edges_propagate)
         # features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = to_device(
         #     features, non_blocking=True), to_device(
@@ -537,7 +537,7 @@ def validate(val_loader, model, criterion):
             to_device(features), to_device(pointclouds), \
              to_device(target), to_device(norms)
 
-        edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored)
+        edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored, args.K_self, args.K_forward, args.K_propagate)
         edges_self, edges_forward, edges_propagate = prepare(edges_self, edges_forward, edges_propagate)
 
         data_time.update(time.time() - end)

@@ -169,7 +169,7 @@ def make_cumulative(original):
             
     return original
 
-def compute_knn_packed(pointclouds, points_stored, K_self=16, K_forward=16, K_propagate=16):
+def compute_knn_packed(pointclouds, points_stored, K_self, K_forward, K_propagate):
     """
     Compute kNN for the given pointclouds after tensorization and batching.
     Input:
@@ -208,12 +208,12 @@ def compute_knn_packed(pointclouds, points_stored, K_self=16, K_forward=16, K_pr
         for j in range(len(pointclouds)):
             temp_points[j] = temp_points[j].squeeze(0)
             if j == 0:
-                nself = compute_knn(temp_points[j], temp_points[j], K_self)
+                nself = compute_knn(temp_points[j], temp_points[j], K_self[j])
                 nei_self_list_temp.append(nself)
             else:
-                nei_forward   = compute_knn(temp_points[j-1], temp_points[j], K_forward)
-                nei_propagate = compute_knn(temp_points[j], temp_points[j-1], K_propagate)
-                nself         = compute_knn(temp_points[j], temp_points[j], K_self)
+                nei_forward   = compute_knn(temp_points[j-1], temp_points[j], K_forward[j])
+                nei_propagate = compute_knn(temp_points[j], temp_points[j-1], K_propagate[j])
+                nself         = compute_knn(temp_points[j], temp_points[j], K_self[j])
                 
                 nei_forward_list_temp.append(nei_forward)
                 nei_propagate_list_temp.append(nei_propagate)

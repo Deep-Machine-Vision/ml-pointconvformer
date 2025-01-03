@@ -119,7 +119,7 @@ def main():
                     target, non_blocking=True), to_device(norms, non_blocking=True)
             
             # edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored)
-            edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored)
+            edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored, args.K_self, args.K_forward, args.K_propagate)
             edges_self, edges_forward, edges_propagate = prepare(edges_self, edges_forward, edges_propagate)
             
         timing_knn.append(time.time()-start_time)

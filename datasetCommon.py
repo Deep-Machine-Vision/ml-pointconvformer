@@ -372,6 +372,8 @@ def collect_fn(data_list, post_knn=True):
 
     return features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms
 
+
+
 def subsample(
         coord,
         norm,
