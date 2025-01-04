@@ -68,6 +68,11 @@ def get_default_training_cfgs(cfg):
     # Augmentation for 3D Scenes. 3DV 2021
     if 'mix3D' not in cfg.keys():
         cfg.mix3D = False
+    
+    if 'post_knn' not in cfg.keys():
+        cfg.post_knn = False
+
+        
     return cfg
 
 

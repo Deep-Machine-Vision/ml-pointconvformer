@@ -183,7 +183,7 @@ def tensorize(
         pointclouds,
         target,
         norms,
-        post_knn=True,
+        post_knn=False,
         edges_self=None,
         edges_forward=None,
         edges_propagate=None):
@@ -211,7 +211,7 @@ def listToBatch(
         pointclouds,
         target,
         norms,
-        post_knn=True,
+        post_knn=False,
         edges_self=None,
         edges_forward=None,
         edges_propagate=None,
@@ -338,7 +338,7 @@ def prepare(
     return features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out
 
 
-def collect_fn(data_list, post_knn=True):
+def collect_fn(data_list, post_knn=False):
     """
     collect data from the data dictionary and outputs pytorch tensors
     """
