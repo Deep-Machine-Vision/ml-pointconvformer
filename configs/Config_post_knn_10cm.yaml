@@ -2,7 +2,7 @@
 # and get_default_configs() in model_architecture.py for the meanings of those configs
 BATCH_NORM:     True
 BATCH_SIZE:     16
-NUM_WORKERS:    24
+NUM_WORKERS:    4
 USE_XYZ:        True
 USE_MLP:        False
 USE_WEIGHT:     True
@@ -21,12 +21,13 @@ TIME: False
 MAX_POINTS_NUM: 550000
 use_ASPP:       False
 NormalizedXYZ:  False
+
 post_knn:       True
 K_forward:      [16, 16, 16, 16, 16]
 K_propagate:    [16, 16, 16, 16, 16]
 K_self:         [16, 16, 16, 16, 16]
 point_dim:      3
-total_epoches:  16
+total_epoches:  300
 
 num_level:      5
 grid_size:      [0.1, 0.2, 0.4, 0.8, 1.6]
