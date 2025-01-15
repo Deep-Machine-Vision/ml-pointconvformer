@@ -38,15 +38,14 @@ std::vector<torch::Tensor> pconv_cuda_backward(
     torch::Tensor weights,
     torch::Tensor additional_features);
 
-// std::vector<torch::Tensor> pconv_linear_cuda_backward(
-//     torch::Tensor grad_output,
-//     torch::Tensor input,
-//     torch::Tensor neighbor_inds,
-//     torch::Tensor weights,
-//     torch::Tensor additional_features,
-//     torch::Tensor linear_weights,
-//     torch::Tensor linear_bias,
-//     torch::Tensor pconv_output);
+std::vector<torch::Tensor> pconv_linear_cuda_backward(
+    torch::Tensor grad_output,
+    torch::Tensor input,
+    torch::Tensor neighbor_inds,
+    torch::Tensor weights,
+    torch::Tensor additional_features,
+    torch::Tensor linear_weights,
+    torch::Tensor pconv_output);
     
 std::vector<torch::Tensor> pcf_cuda_backward(
     torch::Tensor grad_output,
@@ -108,26 +107,24 @@ std::vector<torch::Tensor> pconv_backward(
 }
 
 
-// std::vector<torch::Tensor> pconv_linear_backward(
-//     torch::Tensor grad_output,
-//     torch::Tensor input,
-//     torch::Tensor neighbor_inds,
-//     torch::Tensor weights,
-//     torch::Tensor additional_features,
-//     torch::Tensor linear_weights,
-//     torch::Tensor linear_bias,
-//     torch::Tensor pconv_output)
-// {
-//     CHECK_INPUT(grad_output);
-//     CHECK_INPUT(neighbor_inds);
-//     CHECK_INPUT(weights);
-//     CHECK_INPUT(additional_features);
-//     CHECK_INPUT(linear_weights);
-//     CHECK_INPUT(linear_bias);
-//     CHECK_INPUT(pconv_output);
-//     return pconv_linear_cuda_backward(grad_output, input, neighbor_inds, weights, additional_features,
-//                 linear_weights, linear_bias, pconv_output);
-// }
+std::vector<torch::Tensor> pconv_linear_backward(
+    torch::Tensor grad_output,
+    torch::Tensor input,
+    torch::Tensor neighbor_inds,
+    torch::Tensor weights,
+    torch::Tensor additional_features,
+    torch::Tensor linear_weights,
+    torch::Tensor pconv_output)
+{
+    CHECK_INPUT(grad_output);
+    CHECK_INPUT(neighbor_inds);
+    CHECK_INPUT(weights);
+    CHECK_INPUT(additional_features);
+    CHECK_INPUT(linear_weights);
+    CHECK_INPUT(pconv_output);
+    return pconv_linear_cuda_backward(grad_output, input, neighbor_inds, weights, additional_features,
+                linear_weights, pconv_output);
+}
 
 torch::Tensor pcf_forward(
     torch::Tensor input,
@@ -163,5 +160,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pconv_forward", &pconv_forward, "PointConv forward (CUDA)");
   m.def("pconv_linear_forward", &pconv_linear_forward, "Fused PointConv+Linear forward (CUDA)");
   m.def("pconv_backward", &pconv_backward, "PointConv backward (CUDA)");
-//   m.def("pconv_linear_backward", &pconv_linear_backward, "Fused PointConv+Linear backward (CUDA)");
+  m.def("pconv_linear_backward", &pconv_linear_backward, "Fused PointConv+Linear backward (CUDA)");
 }
