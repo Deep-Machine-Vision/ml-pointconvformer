@@ -181,7 +181,8 @@ __global__ void pconv_linear_cuda_forward_kernel(
         const torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> __restrict__ additional_features,
         const torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> __restrict__ linear_weights,
         const torch::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> __restrict__ linear_bias,
-        torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> __restrict__ final_output)
+        torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> __restrict__ final_output,
+        torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> __restrict__ pconv_output)
 {
 /*
     This kernel implements a fused Point Convolution (PConv) and Linear layer.
@@ -272,6 +273,7 @@ __global__ void pconv_linear_cuda_forward_kernel(
                 }
                 }
                 shared_intermediate[c] = sum;
+                pconv_output[batch_idx][point_idx][c] = sum;  // Store PConv output
         }
 
         __syncthreads();
@@ -438,6 +440,7 @@ __global__ void pconv_linear_cuda_backward_kernel(
         torch::PackedTensorAccessor32<scalar_t,2,torch::RestrictPtrTraits> __restrict__ grad_linear_weights,
         torch::PackedTensorAccessor32<scalar_t,1,torch::RestrictPtrTraits> __restrict__ grad_linear_bias)
 {
+
         extern __shared__ unsigned char memory[];
         scalar_t* shared_grad = reinterpret_cast<scalar_t*>(memory);
 
@@ -454,54 +457,67 @@ __global__ void pconv_linear_cuda_backward_kernel(
         const int point_idx = blockIdx.y;
         const int tid = threadIdx.x;
         const int increment = blockDim.x / C_mid;
-        const int cur_mid = threadIdx.x / increment;
 
-        // grad_x = grad_output * W^T
+        // grad_x = grad_output * W^T for intermediate gradient
         for (int c = tid; c < total_channels; c += blockDim.x) {
                 scalar_t sum = 0;
                 for (int c_out = 0; c_out < C_out; c_out++) {
-                        sum += grad_output[batch_idx][point_idx][c_out] * linear_weights[c_out][c];
+                sum += grad_output[batch_idx][point_idx][c_out] * linear_weights[c_out][c];
                 }
                 shared_grad[c] = sum;
         }
 
         __syncthreads();
 
-        // pconv gradients using intermediate gradients
-        if (cur_mid < C_mid) {
-                int k = threadIdx.x % K;
-                scalar_t weight_grad_temp = 0.0;
-                scalar_t cur_compute;
-
-                // Input features gradient
-                #pragma unroll
-                for (int c = 0; c < C_in; c++) {
-                        int grad_idx = cur_mid * (C_in + C_add) + c;
-                        cur_compute = shared_grad[grad_idx] * weights[batch_idx][point_idx][k][cur_mid];
-                        weight_grad_temp += shared_grad[grad_idx] * input[batch_idx][neighbor_inds[batch_idx][point_idx][k]][c];
-                        atomicAdd(&grad_input[batch_idx][neighbor_inds[batch_idx][point_idx][k]][c], cur_compute);
-                }
-
-                // Additional features gradient
-                #pragma unroll
-                for (int c = 0; c < C_add; c++) {
-                        int grad_idx = cur_mid * (C_in + C_add) + c + C_in;
-                        cur_compute = shared_grad[grad_idx] * weights[batch_idx][point_idx][k][cur_mid];
-                        weight_grad_temp += shared_grad[grad_idx] * additional_features[batch_idx][point_idx][k][c];
-                        atomicAdd(&grad_additional[batch_idx][point_idx][k][c], cur_compute);
-                }
-
-                grad_weights[batch_idx][point_idx][k][cur_mid] = weight_grad_temp;
+        // additional features gradient - each thread processes one (k, c_mid, c_add) combination
+        if (tid < K * C_mid * C_add) {
+                const int k = tid % K;
+                const int mid_idx = (tid / K) % C_mid;
+                const int add_idx = tid / (K * C_mid);
+                
+                const int grad_idx = mid_idx * (C_in + C_add) + C_in + add_idx;
+                grad_additional[batch_idx][point_idx][k][add_idx] = 
+                shared_grad[grad_idx] * weights[batch_idx][point_idx][k][mid_idx];
         }
 
-        // Linear weights gradient: grad_W = pconv_output^T * grad_output
-        for (int c_out = tid; c_out < C_out; c_out += blockDim.x) {
-                for (int c = 0; c < total_channels; c++) {
-                        atomicAdd(&grad_linear_weights[c_out][c], 
-                                grad_output[batch_idx][point_idx][c_out] * pconv_output[batch_idx][point_idx][c]);
+        __syncthreads();
+
+        // input features gradient and weight gradient
+        if (tid < K * C_mid) {
+                const int k = tid % K;
+                const int c_mid = tid / K;
+                scalar_t weight_grad = 0;
+
+                // Input features gradient
+                for (int c = 0; c < C_in; c++) {
+                const int grad_idx = c_mid * (C_in + C_add) + c;
+                const scalar_t grad_val = shared_grad[grad_idx];
+                atomicAdd(&grad_input[batch_idx][neighbor_inds[batch_idx][point_idx][k]][c],
+                        grad_val * weights[batch_idx][point_idx][k][c_mid]);
+                weight_grad += grad_val * input[batch_idx][neighbor_inds[batch_idx][point_idx][k]][c];
                 }
-                // Linear bias gradient: grad_b = sum(grad_output)
-                atomicAdd(&grad_linear_bias[c_out], grad_output[batch_idx][point_idx][c_out]);
+
+                // Additional features contribution to weight gradient
+                for (int c = 0; c < C_add; c++) {
+                const int grad_idx = c_mid * (C_in + C_add) + C_in + c;
+                weight_grad += shared_grad[grad_idx] * additional_features[batch_idx][point_idx][k][c];
+                }
+
+                grad_weights[batch_idx][point_idx][k][c_mid] = weight_grad;
+        }
+
+        // Linear layer gradients
+        if (tid < C_out) {
+                scalar_t bias_grad = grad_output[batch_idx][point_idx][tid];
+                
+                // Linear weights gradient
+                for (int c = 0; c < total_channels; c++) {
+                atomicAdd(&grad_linear_weights[tid][c],
+                        bias_grad * pconv_output[batch_idx][point_idx][c]);
+                }
+                
+                // Linear bias gradient
+                atomicAdd(&grad_linear_bias[tid], bias_grad);
         }
 }
 
@@ -598,7 +614,7 @@ torch::Tensor pconv_cuda_forward(
         return output;
 }
 
-torch::Tensor pconv_linear_cuda_forward(
+std::vector<torch::Tensor> pconv_linear_cuda_forward(
     torch::Tensor input,
     torch::Tensor neighbor_inds,
     torch::Tensor weights,
@@ -615,8 +631,8 @@ torch::Tensor pconv_linear_cuda_forward(
         const int C_add = additional_features.size(3);
         const int C_out = linear_weights.size(0);
 
-        auto output = torch::zeros({B, Nout, C_out}, 
-                                input.options());
+        auto pconv_output = torch::zeros({B, Nout, C_mid * (C_in + C_add)}, input.options());
+        auto final_output = torch::zeros({B, Nout, C_out}, input.options());
 
         const int total_work = std::max({K * C_in, K * C_add, K * C_mid, C_out});
         const int thread_count = std::min(256, nextPowerOf2(total_work));
@@ -638,10 +654,11 @@ torch::Tensor pconv_linear_cuda_forward(
                 additional_features.packed_accessor32<scalar_t,4,torch::RestrictPtrTraits>(),
                 linear_weights.packed_accessor32<scalar_t,2,torch::RestrictPtrTraits>(),
                 linear_bias.packed_accessor32<scalar_t,1,torch::RestrictPtrTraits>(),
-                output.packed_accessor32<scalar_t,3,torch::RestrictPtrTraits>());
+                final_output.packed_accessor32<scalar_t,3,torch::RestrictPtrTraits>(),
+                pconv_output.packed_accessor32<scalar_t,3,torch::RestrictPtrTraits>());
         }));
 
-        return output;
+        return {final_output, pconv_output};
 }
 
 std::vector<torch::Tensor> pconv_cuda_backward(

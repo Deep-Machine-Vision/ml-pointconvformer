@@ -22,7 +22,7 @@ torch::Tensor pconv_cuda_forward(
     torch::Tensor weights,
     torch::Tensor additional_features);
 
-torch::Tensor pconv_linear_cuda_forward(
+std::vector<torch::Tensor> pconv_linear_cuda_forward(
     torch::Tensor input,
     torch::Tensor neighbor_inds,
     torch::Tensor weights,
@@ -73,7 +73,7 @@ torch::Tensor pconv_forward(
     return pconv_cuda_forward(input, neighbor_inds, weights, additional_features);
 }
 
-torch::Tensor pconv_linear_forward(
+std::vector<torch::Tensor> pconv_linear_forward(
     torch::Tensor input,
     torch::Tensor neighbor_inds,
     torch::Tensor weights,
