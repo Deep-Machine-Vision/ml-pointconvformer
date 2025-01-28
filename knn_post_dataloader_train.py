@@ -374,22 +374,27 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler):
 
     for i, data in enumerate(train_loader):
 
-        features, pointclouds, target, norms, points_stored = data
-#        print('maximum points: ', max([feat.shape[0] for feat in features]))
-        features, pointclouds, target, norms = to_device(features, non_blocking=True), to_device(
-                pointclouds, non_blocking=True), to_device(
-                    target, non_blocking=True), to_device(norms, non_blocking=True)
+        if args.post_knn == True:    
+            features, pointclouds, target, norms, points_stored = data
+            features, pointclouds, target, norms = to_device(features, non_blocking=True), to_device(
+                    pointclouds, non_blocking=True), to_device(
+                        target, non_blocking=True), to_device(norms, non_blocking=True)
         
-        edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored, args.K_self, args.K_forward, args.K_propagate)
-        edges_self, edges_forward, edges_propagate = prepare(edges_self, edges_forward, edges_propagate)
-        # features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = to_device(
-        #     features, non_blocking=True), to_device(
-        #     pointclouds, non_blocking=True), to_device(
-        #     edges_self, non_blocking=True), to_device(
-        #         edges_forward, non_blocking=True), to_device(
-        #             edges_propagate, non_blocking=True), to_device(
-        #                 target, non_blocking=True), to_device(
-        #                     norms, non_blocking=True)
+            edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored, args.K_self, args.K_forward, args.K_propagate)
+            edges_self, edges_forward, edges_propagate = prepare(edges_self, edges_forward, edges_propagate)
+        
+        else:
+            features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
+#        print('maximum points: ', max([feat.shape[0] for feat in features]))
+            features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = to_device(
+                features, non_blocking=True), to_device(
+                pointclouds, non_blocking=True), to_device(
+                edges_self, non_blocking=True), to_device(
+                    edges_forward, non_blocking=True), to_device(
+                        edges_propagate, non_blocking=True), to_device(
+                            target, non_blocking=True), to_device(
+                                norms, non_blocking=True)
+        
 
         data_time.update(time.time() - end)
         pred = model(
