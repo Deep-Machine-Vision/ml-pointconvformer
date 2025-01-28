@@ -62,7 +62,7 @@ setup.sh
 
 7. To enable GPU-based KNN computation, set `post_knn: true` in the configuration file. Refer to [`knn_post_dataloader_train.py`](./knn_post_dataloader_train.py) for an example implementation.
 
-## Usage Example GPU-KNN
+### Usage Example GPU-KNN
 ```python
 features, pointclouds, target, norms, points_stored = data
 
@@ -77,8 +77,7 @@ edges_self, edges_forward, edges_propagate = compute_knn_packed(
 edges_self, edges_forward, edges_propagate = prepare(
     edges_self, edges_forward, edges_propagate
 )
-
-
+```
 ### Evaluation
 
 <!-- (Obselete Please download the pretrain weights of the models at [here](https://drive.google.com/file/d/1BShjM0PydlEX-bE7k3-fg2UBORpwUeWR/view?usp=sharing)) -->
