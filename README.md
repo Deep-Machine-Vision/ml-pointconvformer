@@ -60,7 +60,24 @@ setup.sh
 
 6. Run ```sh run_distributed.sh num_gpus config_file_name``` to train the model with num_gpus GPUs, or python train_ScanNet_DDP_WarmUP.py --config configPCF_10cm.yaml to train the model with a single GPU.
 
-7. To enable KNN computation on the GPU after the dataloader, set `post_knn: true` in the config file. See `knn_post_dataloader_train.py` for an example implementation.
+7. To enable GPU-based KNN computation, set `post_knn: true` in the configuration file. Refer to [`knn_post_dataloader_train.py`](./knn_post_dataloader_train.py) for an example implementation.
+
+## Usage Example GPU-KNN
+```python
+features, pointclouds, target, norms, points_stored = data
+
+features, pointclouds, target, norms = to_device(features, non_blocking=True), to_device(
+    pointclouds, non_blocking=True), to_device(
+        target, non_blocking=True), to_device(norms, non_blocking=True)
+
+edges_self, edges_forward, edges_propagate = compute_knn_packed(
+    pointclouds, points_stored, args.K_self, args.K_forward, args.K_propagate
+)
+
+edges_self, edges_forward, edges_propagate = prepare(
+    edges_self, edges_forward, edges_propagate
+)
+
 
 ### Evaluation
 
