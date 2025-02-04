@@ -12,6 +12,7 @@ try:
 except BaseException:
     print('Failed to import cpp_neighbors, nanoflann kNN is not loaded. Only sklearn kNN is available')
 
+from knn_post_dataloader_utils import knn_keops
 
 def grid_subsampling(
         points,
@@ -121,6 +122,8 @@ def compute_knn(ref_points, query_points, K, dilated_rate=1, method='sklearn'):
         neighbors_idx = batch_neighbors(
             query_points, ref_points, [
                 query_points.shape[0]], [num_ref_points], K * dilated_rate)
+
+        
     else:
         raise Exception('compute_knn: unsupported knn algorithm')
     if dilated_rate > 1:
@@ -169,6 +172,9 @@ def tensorizeList(nplist, is_index=False):
             if npitem is None:
                 ret_list.append(None)
             else:
+                if npitem.dtype == np.uint64:
+                    npitem = npitem.astype(np.int64)
+                    
                 ret_list.append(
                     torch.from_numpy(
                         npitem).long().unsqueeze(0))
@@ -319,8 +325,9 @@ def prepare(
 
     
     features_out, pointclouds_out, edges_self_out, edges_forward_out, edges_propagate_out, target_out, norms_out = [], [], [], [], [], [], []
-
+    
     if post_knn:
+
         features_out, pointclouds_out, target_out, norms_out, points_stored = \
         listToBatch(features, pointclouds,target, norms, post_knn)
 
@@ -339,9 +346,6 @@ def prepare(
 
 
 def collect_fn(data_list, post_knn=False):
-    """
-    collect data from the data dictionary and outputs pytorch tensors
-    """
     features = []
     pointclouds = []
     target = []
@@ -349,6 +353,7 @@ def collect_fn(data_list, post_knn=False):
     edges_forward = []
     edges_propagate = []
     edges_self = []
+    
     for i, data in enumerate(data_list):
         features.append(data['feature_list'])
         pointclouds.append(data['point_list'])
@@ -356,21 +361,23 @@ def collect_fn(data_list, post_knn=False):
             target.append(data['label_list'])
         norms.append(data['surface_normal_list'])
 
-        if post_knn == False:
+        if not post_knn:
             edges_forward.append(data['nei_forward_list'])
             edges_propagate.append(data['nei_propagate_list'])
             edges_self.append(data['nei_self_list'])
 
-        if post_knn:
-            features, pointclouds, target, norms, points_stored = \
+    
+    if post_knn:
+        features, pointclouds, target, norms, points_stored = \
             prepare(features, pointclouds, target, norms, post_knn=post_knn)
-                
-            return features, pointclouds, target, norms, points_stored
+        return features, pointclouds, target, norms, points_stored
+    else:
+        features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = \
+            prepare(features, pointclouds, target, norms,
+                    post_knn, edges_self, edges_forward, edges_propagate)
+        return features, pointclouds, edges_self, edges_forward, \
+               edges_propagate, target, norms
 
-    features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = \
-        prepare(features, pointclouds,target, norms, post_knn, edges_self, edges_forward, edges_propagate)
-
-    return features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms
 
 
 
