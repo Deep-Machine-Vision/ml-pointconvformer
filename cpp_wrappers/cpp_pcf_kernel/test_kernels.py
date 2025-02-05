@@ -1,7 +1,9 @@
 import time
+import numpy as np
 import torch
 import pcf_cuda
 import torch.cuda.profiler as profiler
+from pykeops.torch import LazyTensor
 
 
 class PConvFunction(torch.autograd.Function):
@@ -204,14 +206,14 @@ def test_pconv_linear_with_memory(num_runs=100):
     weightnet_dim = 16
 
     unfused_stats = {
-        'after_pconv': [],
-        'after_linear': [],
-        'peak_memory': []
+        "after_pconv": [],
+        "after_linear": [],
+        "peak_memory": []
     }
 
     fused_stats = {
-        'after_forward': [],
-        'peak_memory': []
+        "after_forward": [],
+        "peak_memory": []
     }
 
     # Initialize models
@@ -243,16 +245,16 @@ def test_pconv_linear_with_memory(num_runs=100):
         # Forward Pass (Unfused)
         pconv_out = pconv(feats_x, nei_inds, weights, feat_pe)
         torch.cuda.synchronize()
-        unfused_stats['after_pconv'].append(torch.cuda.memory_allocated() - mem_before)
+        unfused_stats["after_pconv"].append(torch.cuda.memory_allocated() - mem_before)
 
         out_unfused = linear_layer(pconv_out)
         torch.cuda.synchronize()
-        unfused_stats['after_linear'].append(torch.cuda.memory_allocated() - mem_before)
+        unfused_stats["after_linear"].append(torch.cuda.memory_allocated() - mem_before)
 
         # Backward Pass (Unfused)
         out_unfused.backward(grad_output)
         torch.cuda.synchronize()
-        unfused_stats['peak_memory'].append(torch.cuda.max_memory_allocated())
+        unfused_stats["peak_memory"].append(torch.cuda.max_memory_allocated())
 
         # Clear memory
         del pconv_out, out_unfused
@@ -271,11 +273,11 @@ def test_pconv_linear_with_memory(num_runs=100):
         # Forward & Backward (Fused)
         out_fused = pconv_linear(feats_x, nei_inds, weights, feat_pe)
         torch.cuda.synchronize()
-        fused_stats['after_forward'].append(torch.cuda.memory_allocated() - mem_before)
+        fused_stats["after_forward"].append(torch.cuda.memory_allocated() - mem_before)
 
         out_fused.backward(grad_output)
         torch.cuda.synchronize()
-        fused_stats['peak_memory'].append(torch.cuda.max_memory_allocated())
+        fused_stats["peak_memory"].append(torch.cuda.max_memory_allocated())
 
         # Clear memory
         del out_fused
@@ -289,10 +291,10 @@ def test_pconv_linear_with_memory(num_runs=100):
     def calculate_stats(values):
         values = torch.tensor(values, dtype=torch.float64)
         return {
-            'mean': values.mean().item(),
-            'std': values.std().item(),
-            'min': values.min().item(),
-            'max': values.max().item()
+            "mean": values.mean().item(),
+            "std": values.std().item(),
+            "min": values.min().item(),
+            "max": values.max().item()
         }
 
     print("\nUnfused Version Statistics (in MB):")
@@ -311,9 +313,9 @@ def test_pconv_linear_with_memory(num_runs=100):
         print(f"  Min: {stats['min'] / 1024**2:.2f}")
         print(f"  Max: {stats['max'] / 1024**2:.2f}")
 
-    # Calculate average memory savings
-    avg_memory_saved = (torch.tensor(unfused_stats['peak_memory'], dtype=torch.float64).mean() - 
-                       torch.tensor(fused_stats['peak_memory'], dtype=torch.float64).mean())
+    # Average memory savings
+    avg_memory_saved = (torch.tensor(unfused_stats["peak_memory"], dtype=torch.float64).mean() - 
+                       torch.tensor(fused_stats["peak_memory"], dtype=torch.float64).mean())
     print(f"\nAverage Memory Saved by Fusion: {avg_memory_saved / 1024**2:.2f} MB")
 
     print("\nTensor Sizes:")
@@ -324,6 +326,153 @@ def test_pconv_linear_with_memory(num_runs=100):
     print(f"Linear weights: {linear_weights.shape}")
 
 
+def test_knn_inv():
+    def createInverse_python(neighborMat, total_points):
+        """
+        Create inverse mapping for KNN
+        Args:
+            neighborMat: Array of shape [num_points, K] containing neighbor indices
+            total_points: Total number of points in the point cloud (including potential points to add)
+        """
+        K = neighborMat.shape[1]
+        neigh = [[] for n in range(total_points)]
+        inv_k = [[] for n in range(total_points)]
+
+        # Build neighbor lists
+        for r in range(neighborMat.shape[0]):
+            for c in range(K):
+                neigh[neighborMat[r,c]].append(r)
+                inv_k[neighborMat[r,c]].append(c)
+
+        # Compute index array
+        idx = [len(x) for x in neigh]
+        cum_sum = 0
+        idx_array = []
+        for i in range(total_points):
+            if idx[i] == 0:
+                idx_array.append(cum_sum)
+            else:
+                idx_array.append(cum_sum)
+                cum_sum = idx[i] + cum_sum
+        idx_array.append(neighborMat.shape[0] * K)  # Total size of inverse arrays
+
+        neighbors = np.hstack([np.array(x) for x in neigh if len(x) > 0]).flatten()
+        inv_k = np.hstack([np.array(x) for x in inv_k if len(x) > 0]).flatten()
+
+        return (torch.from_numpy(neighbors).cuda().long(), 
+                torch.from_numpy(inv_k).cuda().long(), 
+                torch.from_numpy(np.array(idx_array)).cuda().long())
+
+    def knn(pts1, pts2, nsample):
+        """KNN implementation"""
+        B, S, C = pts1.shape
+        _, N, _ = pts2.shape
+        x_i = LazyTensor(pts1.view(B, S, 1, C))
+        y_j = LazyTensor(pts2.view(B, 1, N, C))
+        D_ij = ((x_i - y_j)**2).sum(-1)**0.5
+        _, indices_i = D_ij.Kmin_argKmin(nsample, dim=2)
+        return indices_i.long()
+
+    def compare_outputs_by_segments(cuda_neighbors, cuda_k, py_neighbors, py_k, inv_idx):
+        """Compare outputs by sorting pairs within each segment defined by inv_idx"""
+        cuda_neighbors = cuda_neighbors.cpu().numpy()
+        cuda_k = cuda_k.cpu().numpy()
+        py_neighbors = py_neighbors.cpu().numpy()
+        py_k = py_k.cpu().numpy()
+        inv_idx = inv_idx.cpu().numpy()
+
+        total_diff = 0
+        for batch in range(cuda_neighbors.shape[0]):
+            for i in range(len(inv_idx[batch]) - 1):
+                start, end = inv_idx[batch][i], inv_idx[batch][i+1]
+                if start == end:  # Empty segment
+                    continue
+
+                # Get segments and create pairs
+                cuda_pairs = list(zip(cuda_neighbors[batch, start:end], 
+                                    cuda_k[batch, start:end]))
+                py_pairs = list(zip(py_neighbors[batch, start:end], 
+                                  py_k[batch, start:end]))
+
+                # Sort pairs within segment
+                cuda_pairs.sort()
+                py_pairs.sort()
+
+                # Compare sorted pairs
+                if cuda_pairs != py_pairs:
+                    total_diff += 1
+                    if total_diff <= 5:  # Show only first 5 diffs
+                        print(f"\nMismatch in batch {batch}, point {i}:")
+                        print(f"  CUDA pairs:   {cuda_pairs}")
+                        print(f"  Python pairs: {py_pairs}")
+
+        return total_diff
+
+
+    B = 16          # batch size (meh!!)
+    N = 2048        # number of points 
+    C_in = 3        # number of inp channels
+    K = 48          # number of neighbors
+    total_points = N
+
+    torch.manual_seed(42)
+    input_points = torch.randn(B, N, 3, device="cuda", requires_grad=False)
+    input_points_ds = torch.randn(B, N//2, 3, device="cuda", requires_grad=False)
+
+    neighbor_inds = knn(input_points, input_points, K).contiguous()
+
+    print("\nNeighbor indices shape:", neighbor_inds.shape)
+    print("Neighbor indices range:", neighbor_inds.min().item(), "to", neighbor_inds.max().item())
+
+    # Compute Inverse Mapping
+    # Cuda Kernel
+    cuda_outputs = pcf_cuda.compute_knn_inverse(neighbor_inds, total_points)
+
+    # Python - batch by batch
+    python_outputs = [], [], []
+    for b in range(B):
+        n_out, k_out, idx_out = createInverse_python(neighbor_inds[b].cpu().numpy(), total_points)
+        python_outputs[0].append(n_out)
+        python_outputs[1].append(k_out)
+        python_outputs[2].append(idx_out)
+    
+    python_outputs = [torch.stack(x, dim=0) for x in python_outputs]
+
+    print("\nComparing CUDA and Python (native) implementations:")
+    print("\nShape comparison:")
+    for cuda_out, py_out, name in zip(cuda_outputs, python_outputs, 
+                                    ["inv_neighbors", "inv_k", "inv_idx"]):
+        print(f"{name}:")
+        print(f"  CUDA shape: {cuda_out.shape}")
+        print(f"  Python shape: {py_out.shape}")
+
+    print("\ninv_idx comparison:")
+    inv_idx_diff = (cuda_outputs[2] != python_outputs[2]).sum().item()
+    if inv_idx_diff > 0:
+        print(f"WARNING: inv_idx don't match :(  Number of differences: {inv_idx_diff}")
+        # Show only first few differences
+        mismatch = (cuda_outputs[2] != python_outputs[2]).nonzero(as_tuple=True)
+        for i in range(min(5, len(mismatch[0]))):
+            idx = tuple(d[i] for d in mismatch)
+            print(f"  Position {idx}:")
+            print(f"    CUDA:   {cuda_outputs[2][idx].item()}")
+            print(f"    Python: {python_outputs[2][idx].item()}")
+    else:
+        print("inv_idx sums match exactly :)")
+
+    print("\nNeighbor-K pairs comparison:")
+    num_diff = compare_outputs_by_segments(
+        cuda_outputs[0], cuda_outputs[1],
+        python_outputs[0], python_outputs[1],
+        python_outputs[2]
+    )
+
+    print(f"\nNumber of segments with mismatches: {num_diff}")
+    if num_diff == 0:
+        print("All segments match after sorting :)")
+
+
 if __name__ == "__main__":
     test_pconv_linear()
     test_pconv_linear_with_memory()
+    test_knn_inv()
