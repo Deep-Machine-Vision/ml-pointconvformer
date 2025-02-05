@@ -29,7 +29,7 @@ from util.lr import MultiStepWithWarmup, CosineAnnealingWarmupRestarts
 from model_architecture import PointConvFormer_Segmentation as VI_PointConv
 from model_architecture import get_default_configs
 import scannet_data_loader_color_DDP as scannet_data_loader
-
+from knn_post_dataloader_utils import prepare, compute_knn_packed
 
 def get_default_training_cfgs(cfg):
     '''
@@ -72,7 +72,6 @@ def get_default_training_cfgs(cfg):
     if 'post_knn' not in cfg.keys():
         cfg.post_knn = False
 
-        
     return cfg
 
 
@@ -376,8 +375,18 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler):
 
     for i, data in enumerate(train_loader):
 
-        features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
-#        print('maximum points: ', max([feat.shape[0] for feat in features]))
+        
+        if args.post_knn:
+            features, pointclouds, target, norms, points_stored = data
+
+            edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored, args.K_self, args.K_forward, args.K_propagate)
+            edges_self, edges_forward, edges_propagate = prepare(edges_self, edges_forward, edges_propagate)
+
+        else:
+            features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
+        
+        
+        
         features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = to_device(
             features, non_blocking=True), to_device(
             pointclouds, non_blocking=True), to_device(
@@ -528,8 +537,16 @@ def validate(val_loader, model, criterion):
     model.eval()
     end = time.time()
     for i, data in enumerate(val_loader):
+        
+        if args.post_knn:
+            features, pointclouds, target, norms, points_stored = data
 
-        features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
+            edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored, args.K_self, args.K_forward, args.K_propagate)
+            edges_self, edges_forward, edges_propagate = prepare(edges_self, edges_forward, edges_propagate)
+        
+        else:
+            features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
+        
         features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = \
             to_device(features), to_device(pointclouds), \
             to_device(edges_self), to_device(edges_forward), \

@@ -122,18 +122,28 @@ def main():
         start_time.record()
         for i, data in enumerate(train_data_loader):
             
-            features, pointclouds, target, norms, points_stored= data
+            if args.post_knn:
+                features, pointclouds, target, norms, points_stored = data
+                
+                edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored, args.K_self, args.K_forward, args.K_propagate)
+                edges_self, edges_forward, edges_propagate = prepare(edges_self, edges_forward, edges_propagate)
 
-            features, pointclouds, target, norms = to_device(features, non_blocking=True), to_device(
-                pointclouds, non_blocking=True), to_device(
-                    target, non_blocking=True), to_device(norms, non_blocking=True)
+            else:
+                features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = data
             
-            # edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored)
-            edges_self, edges_forward, edges_propagate = compute_knn_packed(pointclouds, points_stored, args.K_self, args.K_forward, args.K_propagate)
-            edges_self, edges_forward, edges_propagate = prepare(edges_self, edges_forward, edges_propagate)
+            
+            
+            features, pointclouds, edges_self, edges_forward, edges_propagate, target, norms = to_device(
+                features, non_blocking=True), to_device(
+                pointclouds, non_blocking=True), to_device(
+                edges_self, non_blocking=True), to_device(
+                    edges_forward, non_blocking=True), to_device(
+                        edges_propagate, non_blocking=True), to_device(
+                            target, non_blocking=True), to_device(
+                                norms, non_blocking=True)
         torch.cuda.synchronize()
         end_time.record()
-        torch.cuda.synchronize()   
+        torch.cuda.synchronize()    
         timing_knn.append(start_time.elapsed_time(end_time)/1000)
         print("done",t, " ", i)
         # Example of how you might process each batch of data

@@ -5,30 +5,24 @@ from pykeops.torch import LazyTensor
 
 def knn_keops(ref_points, query_points, K):
     """
-    Compute k-nearest neighbors using KeOps, and return indices as NumPy arrays.
+    Compute k-nearest neighbors using KeOps, and return indices.
     """
-    # Ensure inputs are PyTorch tensors
+    
     if isinstance(ref_points, np.ndarray):
         ref_points = torch.tensor(ref_points, dtype=torch.float32)
     if isinstance(query_points, np.ndarray):
         query_points = torch.tensor(query_points, dtype=torch.float32)
     
-    # # Move tensors to CUDA if available
-    # ref_points = ref_points.cuda()
-    # query_points = query_points.cuda()
     
-    # Compute pairwise squared distances using LazyTensor
     ref_lazy = LazyTensor(ref_points[:, None, :])  # Mx1xD
     query_lazy = LazyTensor(query_points[None, :, :])  # 1xNxD
     distances = ((ref_lazy - query_lazy) ** 2).sum(-1)  # Pairwise squared distances (MxN)
+   
+    indices = distances.argKmin(K, dim=0)
     
-    # Get top K minimum distances and corresponding indices
-    indices = distances.argKmin(K, dim=0)  # Shape: (N, K)
-    # indices = indices.cpu().numpy()
     del ref_lazy, query_lazy, distances
-    # torch.cuda.empty_cache()
-    # Convert the indices to a NumPy array
-    return indices  # Move to CPU and convert to NumPy
+
+    return indices
 
 def compute_knn(ref_points, query_points, K, dilated_rate=1, method='keops'):
     """
@@ -39,7 +33,6 @@ def compute_knn(ref_points, query_points, K, dilated_rate=1, method='keops'):
         K: the amount of neighbors for each point
         dilated_rate: If set to larger than 1, then select more neighbors and then choose from them
         (Engelmann et al. Dilated Point Convolutions: On the Receptive Field Size of Point Convolutions on 3D Point Clouds. ICRA 2020)
-        method: Choose between two approaches: Scikit-Learn ('sklearn') or nanoflann ('nanoflann'). In general nanoflann should be faster, but sklearn is more stable
     Output:
         neighbors_idx: for each query point, its K nearest neighbors among the reference points (N x K)
     """
@@ -59,14 +52,10 @@ def compute_knn(ref_points, query_points, K, dilated_rate=1, method='keops'):
             query_points,
             k=K * dilated_rate,
             return_distance=False)
+    
     elif method == 'keops':
-        # print("Using keops")
         neighbors_idx = knn_keops(ref_points, query_points, K*dilated_rate)
-
-    # elif method == 'nanoflann':
-    #     neighbors_idx = batch_neighbors(
-    #         query_points, ref_points, [
-    #             query_points.shape[0]], [num_ref_points], K * dilated_rate)
+    
     else:
         raise Exception('compute_knn: unsupported knn algorithm')
     if dilated_rate > 1:
@@ -91,7 +80,6 @@ def tensorizeTensorList(tensor_list):
 def tensorize(edges_self, edges_forward, edges_propagate):
     """
     Tensorize transforms a batch of multiple edge sets into a single tensor.
-    This focuses only on `edges_self`, `edges_forward`, and `edges_propagate`.
     """
     edges_self = tensorizeTensorList(edges_self)
     edges_forward = tensorizeTensorList(edges_forward)
@@ -103,8 +91,6 @@ def tensorize(edges_self, edges_forward, edges_propagate):
 def listToBatch(edges_self, edges_forward, edges_propagate):
     """
     ListToBatch transforms a batch of multiple edge sets into a single set.
-    Focused on `edges_self`, `edges_forward`, and `edges_propagate`.
-    This version uses PyTorch tensors.
     """
     num_sample = len(edges_self)
 
@@ -156,18 +142,6 @@ def prepare(edges_self, edges_forward, edges_propagate):
     return edges_self_out, edges_forward_out, edges_propagate_out
 
 
-def make_cumulative(original):
-    
-    for i in range(0, len(original)):
-        temp_list = []
-        temp_list.append(0)
-        for itr in original[i]:
-            temp_list.append(temp_list[-1] + itr)
-        original[i] = temp_list
-    # for i in range(1, len(original)):
-        
-            
-    return original
 
 def compute_knn_packed(pointclouds, points_stored, K_self, K_forward, K_propagate):
     """
@@ -190,8 +164,9 @@ def compute_knn_packed(pointclouds, points_stored, K_self, K_forward, K_propagat
     nei_propagate_list = [[] for _ in range(n)]
     nei_self_list      = [[] for _ in range(n)]
 
-    points_stored = make_cumulative(points_stored)
-   
+
+    points_stored = [np.cumsum([0] + sublist).tolist() for sublist in points_stored]   
+    
     for i in range(n):
 
         temp_points = []
@@ -222,6 +197,6 @@ def compute_knn_packed(pointclouds, points_stored, K_self, K_forward, K_propagat
         nei_forward_list[i]   = nei_forward_list_temp
         nei_propagate_list[i] = nei_propagate_list_temp
         nei_self_list[i]      = nei_self_list_temp
-        # print(len(nei_self_list_temp))
+       
 
     return nei_self_list, nei_forward_list, nei_propagate_list
