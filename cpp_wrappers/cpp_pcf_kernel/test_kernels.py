@@ -327,22 +327,22 @@ def test_pconv_linear_with_memory(num_runs=100):
 
 
 def test_knn_inv():
-    def createInverse_python(neighborMat, total_points):
+    def create_inverse_python(neighbor_mat, total_points):
         """
         Create inverse mapping for KNN
         Args:
-            neighborMat: Array of shape [num_points, K] containing neighbor indices
+            neighbor_mat: Array of shape [num_points, K] containing neighbor indices
             total_points: Total number of points in the point cloud (including potential points to add)
         """
-        K = neighborMat.shape[1]
+        K = neighbor_mat.shape[1]
         neigh = [[] for n in range(total_points)]
         inv_k = [[] for n in range(total_points)]
 
-        # Build neighbor lists
-        for r in range(neighborMat.shape[0]):
+        # Neighbor lists
+        for r in range(neighbor_mat.shape[0]):
             for c in range(K):
-                neigh[neighborMat[r,c]].append(r)
-                inv_k[neighborMat[r,c]].append(c)
+                neigh[neighbor_mat[r,c]].append(r)
+                inv_k[neighbor_mat[r,c]].append(c)
 
         # Compute index array
         idx = [len(x) for x in neigh]
@@ -354,7 +354,7 @@ def test_knn_inv():
             else:
                 idx_array.append(cum_sum)
                 cum_sum = idx[i] + cum_sum
-        idx_array.append(neighborMat.shape[0] * K)  # Total size of inverse arrays
+        idx_array.append(neighbor_mat.shape[0] * K)  # total size of inverse arrays
 
         neighbors = np.hstack([np.array(x) for x in neigh if len(x) > 0]).flatten()
         inv_k = np.hstack([np.array(x) for x in inv_k if len(x) > 0]).flatten()
@@ -364,7 +364,6 @@ def test_knn_inv():
                 torch.from_numpy(np.array(idx_array)).cuda().long())
 
     def knn(pts1, pts2, nsample):
-        """KNN implementation"""
         B, S, C = pts1.shape
         _, N, _ = pts2.shape
         x_i = LazyTensor(pts1.view(B, S, 1, C))
@@ -374,7 +373,9 @@ def test_knn_inv():
         return indices_i.long()
 
     def compare_outputs_by_segments(cuda_neighbors, cuda_k, py_neighbors, py_k, inv_idx):
-        """Compare outputs by sorting pairs within each segment defined by inv_idx"""
+        """
+        Compare outputs by sorting pairs within each segment defined by inv_idx
+        """
         cuda_neighbors = cuda_neighbors.cpu().numpy()
         cuda_k = cuda_k.cpu().numpy()
         py_neighbors = py_neighbors.cpu().numpy()
@@ -385,7 +386,7 @@ def test_knn_inv():
         for batch in range(cuda_neighbors.shape[0]):
             for i in range(len(inv_idx[batch]) - 1):
                 start, end = inv_idx[batch][i], inv_idx[batch][i+1]
-                if start == end:  # Empty segment
+                if start == end:  # if empty segment
                     continue
 
                 # Get segments and create pairs
@@ -398,7 +399,7 @@ def test_knn_inv():
                 cuda_pairs.sort()
                 py_pairs.sort()
 
-                # Compare sorted pairs
+                # Compare
                 if cuda_pairs != py_pairs:
                     total_diff += 1
                     if total_diff <= 5:  # Show only first 5 diffs
@@ -414,6 +415,7 @@ def test_knn_inv():
     C_in = 3        # number of inp channels
     K = 48          # number of neighbors
     total_points = N
+    num_runs = 100
 
     torch.manual_seed(42)
     input_points = torch.randn(B, N, 3, device="cuda", requires_grad=False)
@@ -424,14 +426,107 @@ def test_knn_inv():
     print("\nNeighbor indices shape:", neighbor_inds.shape)
     print("Neighbor indices range:", neighbor_inds.min().item(), "to", neighbor_inds.max().item())
 
+    print("\nPerformance Benchmarking:")
+    print(f"Running {num_runs} iterations for each implementation...")
+
+    # Warmup
+    print("\nPerforming warmup runs...")
+    for _ in range(5):
+        _ = pcf_cuda.compute_knn_inverse(neighbor_inds, total_points)
+        torch.cuda.synchronize()
+        for b in range(B):
+            _ = create_inverse_python(neighbor_inds[b].cpu().numpy(), total_points)
+        torch.cuda.synchronize()
+
+    # Benchmark
+    print("\nBenchmarking CUDA implementation...")
+    cuda_times = []
+    cuda_memory = []
+
+    for i in range(num_runs):
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+        mem_before = torch.cuda.memory_allocated()
+        start_time = time.time()
+
+        cuda_outputs = pcf_cuda.compute_knn_inverse(neighbor_inds, total_points)
+
+        torch.cuda.synchronize()
+        end_time = time.time()
+
+        cuda_times.append(end_time - start_time)
+        cuda_memory.append(torch.cuda.max_memory_allocated() - mem_before)
+
+        del cuda_outputs
+        torch.cuda.empty_cache()
+
+    # Benchmark
+    print("Benchmarking Python implementation...")
+    python_times = []
+    python_memory = []
+
+    for i in range(num_runs):
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+        mem_before = torch.cuda.memory_allocated()
+        start_time = time.time()
+
+        python_outputs = [], [], []
+        for b in range(B):
+            n_out, k_out, idx_out = create_inverse_python(neighbor_inds[b].cpu().numpy(), total_points)
+            python_outputs[0].append(n_out)
+            python_outputs[1].append(k_out)
+            python_outputs[2].append(idx_out)
+        python_outputs = [torch.stack(x, dim=0) for x in python_outputs]
+
+        torch.cuda.synchronize()
+        end_time = time.time()
+
+        python_times.append(end_time - start_time)
+        python_memory.append(torch.cuda.max_memory_allocated() - mem_before)
+
+        del python_outputs
+        torch.cuda.empty_cache()
+
+    cuda_times = np.array(cuda_times) * 1000 
+    python_times = np.array(python_times) * 1000
+    cuda_memory = np.array(cuda_memory) / (1024 * 1024)  # to MB
+    python_memory = np.array(python_memory) / (1024 * 1024)  # to MB
+
+    print("\nPerformance Results:")
+    print("\nCUDA Implementation:")
+    print(f"Runtime (ms):")
+    print(f"  Mean: {np.mean(cuda_times):.2f} ± {np.std(cuda_times):.2f}")
+    print(f"  Min:  {np.min(cuda_times):.2f}")
+    print(f"  Max:  {np.max(cuda_times):.2f}")
+    print(f"Memory Usage (MB):")
+    print(f"  Mean: {np.mean(cuda_memory):.2f} ± {np.std(cuda_memory):.2f}")
+    print(f"  Min:  {np.min(cuda_memory):.2f}")
+    print(f"  Max:  {np.max(cuda_memory):.2f}")
+
+    print("\nPython Implementation:")
+    print(f"Runtime (ms):")
+    print(f"  Mean: {np.mean(python_times):.2f} ± {np.std(python_times):.2f}")
+    print(f"  Min:  {np.min(python_times):.2f}")
+    print(f"  Max:  {np.max(python_times):.2f}")
+    print(f"Memory Usage (MB):")
+    print(f"  Mean: {np.mean(python_memory):.2f} ± {np.std(python_memory):.2f}")
+    print(f"  Min:  {np.min(python_memory):.2f}")
+    print(f"  Max:  {np.max(python_memory):.2f}")
+
+    print("\nSpeedup: {:.2f}x".format(np.mean(python_times) / np.mean(cuda_times)))
+    print("Memory Reduction: {:.2f}x".format(np.mean(python_memory) / np.mean(cuda_memory)))
+
     # Compute Inverse Mapping
+    print("\nVerifying correctness...")
+
     # Cuda Kernel
     cuda_outputs = pcf_cuda.compute_knn_inverse(neighbor_inds, total_points)
 
     # Python - batch by batch
     python_outputs = [], [], []
     for b in range(B):
-        n_out, k_out, idx_out = createInverse_python(neighbor_inds[b].cpu().numpy(), total_points)
+        n_out, k_out, idx_out = create_inverse_python(neighbor_inds[b].cpu().numpy(), total_points)
         python_outputs[0].append(n_out)
         python_outputs[1].append(k_out)
         python_outputs[2].append(idx_out)
@@ -450,7 +545,7 @@ def test_knn_inv():
     inv_idx_diff = (cuda_outputs[2] != python_outputs[2]).sum().item()
     if inv_idx_diff > 0:
         print(f"WARNING: inv_idx don't match :(  Number of differences: {inv_idx_diff}")
-        # Show only first few differences
+        # Show only first few diffs
         mismatch = (cuda_outputs[2] != python_outputs[2]).nonzero(as_tuple=True)
         for i in range(min(5, len(mismatch[0]))):
             idx = tuple(d[i] for d in mismatch)
