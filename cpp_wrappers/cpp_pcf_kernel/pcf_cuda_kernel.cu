@@ -35,66 +35,68 @@ __global__ void convert_to_half(
 }
 
 
-
 // Simple counting to get the number of neighbors for each point
 __global__ void count_neighbors_kernel(
-    const torch::PackedTensorAccessor32<int,3,torch::RestrictPtrTraits> neighbor_inds,
-    torch::PackedTensorAccessor32<int,2,torch::RestrictPtrTraits> counts,
-    const int total_points
+        const torch::PackedTensorAccessor32<int,3,torch::RestrictPtrTraits> neighbor_inds,
+        torch::PackedTensorAccessor32<int,1,torch::RestrictPtrTraits> counts,
+        const int total_points,
+        const int start_point,
+        const int batch_idx
 ) {
-    const int batch_idx = blockIdx.x;
-    const int point_idx = blockIdx.y;
-    const int k_idx = threadIdx.x;
+        const int local_point_idx = blockIdx.y;
+        const int point_idx = start_point + local_point_idx;
+        const int tid = threadIdx.x;
+        const int K = neighbor_inds.size(2);
 
-    const int K = neighbor_inds.size(2);
-    if (k_idx >= K) return;
-
-    const int neighbor = neighbor_inds[batch_idx][point_idx][k_idx];
-    if (neighbor >= 0 && neighbor < total_points) {
-        atomicAdd(&counts[batch_idx][neighbor], 1);
-    }
+        // Process K neighbors in strided fashion
+        for (int k = tid; k < K; k += blockDim.x) {
+                const int neighbor = neighbor_inds[batch_idx][point_idx][k];
+                if (neighbor >= 0 && neighbor < total_points) {
+                        atomicAdd(&counts[neighbor], 1);
+                }
+        }
 }
 
 // Compute inv_idx for counts
 __global__ void compute_inv_idx_kernel(
-    torch::PackedTensorAccessor32<int,2,torch::RestrictPtrTraits> counts,
-    torch::PackedTensorAccessor32<int,2,torch::RestrictPtrTraits> inv_idx,
-    const int total_points
+        torch::PackedTensorAccessor32<int,1,torch::RestrictPtrTraits> counts,
+        torch::PackedTensorAccessor32<int,2,torch::RestrictPtrTraits> inv_idx,
+        const int total_points,
+        const int batch_idx
 ) {
-    const int batch_idx = blockIdx.x;
-
-    if (threadIdx.x == 0) {
         inv_idx[batch_idx][0] = 0;
         for (int i = 0; i < total_points; i++) {
-            inv_idx[batch_idx][i + 1] = inv_idx[batch_idx][i] + counts[batch_idx][i];
+                inv_idx[batch_idx][i + 1] = inv_idx[batch_idx][i] + counts[i];
         }
-    }
 }
 
 // Fill inverse neighbors and k indices
 __global__ void fill_inverse_kernel(
-    const torch::PackedTensorAccessor32<int,3,torch::RestrictPtrTraits> neighbor_inds,
-    torch::PackedTensorAccessor32<int,2,torch::RestrictPtrTraits> inv_neighbors,
-    torch::PackedTensorAccessor32<int,2,torch::RestrictPtrTraits> inv_k,
-    torch::PackedTensorAccessor32<int,2,torch::RestrictPtrTraits> running_counts,
-    torch::PackedTensorAccessor32<int,2,torch::RestrictPtrTraits> inv_idx,
-    const int total_points
+        const torch::PackedTensorAccessor32<int,3,torch::RestrictPtrTraits> neighbor_inds,
+        torch::PackedTensorAccessor32<int,2,torch::RestrictPtrTraits> inv_neighbors,
+        torch::PackedTensorAccessor32<int,2,torch::RestrictPtrTraits> inv_k,
+        torch::PackedTensorAccessor32<int,1,torch::RestrictPtrTraits> running_counts,
+        torch::PackedTensorAccessor32<int,2,torch::RestrictPtrTraits> inv_idx,
+        const int total_points,
+        const int start_point,
+        const int batch_idx
 ) {
-    const int batch_idx = blockIdx.x;
-    const int point_idx = blockIdx.y;
-    const int k_idx = threadIdx.x;
+        const int local_point_idx = blockIdx.y;
+        const int point_idx = start_point + local_point_idx;
+        const int tid = threadIdx.x;
+        const int K = neighbor_inds.size(2);
 
-    const int K = neighbor_inds.size(2);
-    if (k_idx >= K) return;
+        // Process K neighbors in strided fashion
+        for (int k = tid; k < K; k += blockDim.x) {
+                const int neighbor = neighbor_inds[batch_idx][point_idx][k];
+                if (neighbor >= 0 && neighbor < total_points) {
+                        const int pos = atomicAdd(&running_counts[neighbor], 1);
+                        const int idx = inv_idx[batch_idx][neighbor] + pos;
 
-    const int neighbor = neighbor_inds[batch_idx][point_idx][k_idx];
-    if (neighbor >= 0 && neighbor < total_points) {
-        const int pos = atomicAdd(&running_counts[batch_idx][neighbor], 1);
-        const int idx = inv_idx[batch_idx][neighbor] + pos;
-
-        inv_neighbors[batch_idx][idx] = point_idx;
-        inv_k[batch_idx][idx] = k_idx;
-    }
+                        inv_neighbors[batch_idx][idx] = point_idx;
+                        inv_k[batch_idx][idx] = k;
+                }
+        }
 }
 
 
@@ -809,50 +811,78 @@ std::vector<torch::Tensor> pconv_linear_cuda_backward(
 
 
 std::vector<torch::Tensor> knn_inverse_cuda_forward(
-    torch::Tensor neighbor_inds,
-    const int total_points) 
+        torch::Tensor neighbor_inds,
+        const int total_points) 
 {
-    const int B = neighbor_inds.size(0);
-    const int N = neighbor_inds.size(1);
-    const int K = neighbor_inds.size(2);
+        const int B = neighbor_inds.size(0);
+        const int N = neighbor_inds.size(1);
+        const int K = neighbor_inds.size(2);
 
-    // Convert input to int if its not already
-    auto neighbor_inds_int = neighbor_inds.to(torch::kInt32);
+        // Convert input to int if its not already
+        auto neighbor_inds_int = neighbor_inds.to(torch::kInt32);
 
-    auto counts = torch::zeros({B, total_points}, neighbor_inds_int.options());
-    auto inv_idx = torch::zeros({B, total_points + 1}, neighbor_inds_int.options());
-    auto running_counts = torch::zeros({B, total_points}, neighbor_inds_int.options());
-    auto inv_neighbors = torch::zeros({B, N * K}, neighbor_inds_int.options());
-    auto inv_k = torch::zeros({B, N * K}, neighbor_inds_int.options());
+        auto inv_neighbors = torch::zeros({B, N * K}, neighbor_inds_int.options());
+        auto inv_k = torch::zeros({B, N * K}, neighbor_inds_int.options());
+        auto inv_idx = torch::zeros({B, total_points + 1}, neighbor_inds_int.options());
 
-    const dim3 block(256);
-    const dim3 grid(B, N);
+        const int threads_per_block = 512;
+        const int points_per_grid = 65535;
+        const int num_y_grids = (N + points_per_grid - 1) / points_per_grid;
 
-    // Count neighbors
-    count_neighbors_kernel<<<grid, block>>>(
-        neighbor_inds_int.packed_accessor32<int,3,torch::RestrictPtrTraits>(),
-        counts.packed_accessor32<int,2,torch::RestrictPtrTraits>(),
-        total_points
-    );
+        // Process each batch separately - we do this to save memory for large point clouds
+        for (int b = 0; b < B; b++) {
+                auto counts = torch::zeros({total_points}, neighbor_inds_int.options());
+                auto running_counts = torch::zeros({total_points}, neighbor_inds_int.options());
 
-    // Compute inv_idx
-    compute_inv_idx_kernel<<<B, 1>>>(
-        counts.packed_accessor32<int,2,torch::RestrictPtrTraits>(),
-        inv_idx.packed_accessor32<int,2,torch::RestrictPtrTraits>(),
-        total_points
-    );
+                // Count neighbors for this batch
+                for (int grid_idx = 0; grid_idx < num_y_grids; grid_idx++) {
+                        const int start_point = grid_idx * points_per_grid;
+                        const int points_this_grid = std::min(points_per_grid, N - start_point);
 
-    // Fill inverse neighbors and k indices
-    fill_inverse_kernel<<<grid, block>>>(
-        neighbor_inds_int.packed_accessor32<int,3,torch::RestrictPtrTraits>(),
-        inv_neighbors.packed_accessor32<int,2,torch::RestrictPtrTraits>(),
-        inv_k.packed_accessor32<int,2,torch::RestrictPtrTraits>(),
-        running_counts.packed_accessor32<int,2,torch::RestrictPtrTraits>(),
-        inv_idx.packed_accessor32<int,2,torch::RestrictPtrTraits>(),
-        total_points
-    );
+                        const dim3 block(threads_per_block);
+                        const dim3 grid(1, points_this_grid);  // only 1 batch
 
-    return {inv_neighbors.to(neighbor_inds.dtype()), 
-            inv_k.to(neighbor_inds.dtype()), 
-            inv_idx.to(neighbor_inds.dtype())};
+                        count_neighbors_kernel<<<grid, block>>>(
+                                neighbor_inds_int.packed_accessor32<int,3,torch::RestrictPtrTraits>(),
+                                counts.packed_accessor32<int,1,torch::RestrictPtrTraits>(),
+                                total_points,
+                                start_point,
+                                b
+                        );
+                }
+
+                // Get inv_idx for this batch
+                compute_inv_idx_kernel<<<1, 1>>>(
+                        counts.packed_accessor32<int,1,torch::RestrictPtrTraits>(),
+                        inv_idx.packed_accessor32<int,2,torch::RestrictPtrTraits>(),
+                        total_points,
+                        b
+                );
+
+                // Fill inverse mapping for this batch
+                for (int grid_idx = 0; grid_idx < num_y_grids; grid_idx++) {
+                        const int start_point = grid_idx * points_per_grid;
+                        const int points_this_grid = std::min(points_per_grid, N - start_point);
+
+                        const dim3 block(threads_per_block);
+                        const dim3 grid(1, points_this_grid);  // only 1 batch
+
+                        fill_inverse_kernel<<<grid, block>>>(
+                                neighbor_inds_int.packed_accessor32<int,3,torch::RestrictPtrTraits>(),
+                                inv_neighbors.packed_accessor32<int,2,torch::RestrictPtrTraits>(),
+                                inv_k.packed_accessor32<int,2,torch::RestrictPtrTraits>(),
+                                running_counts.packed_accessor32<int,1,torch::RestrictPtrTraits>(),
+                                inv_idx.packed_accessor32<int,2,torch::RestrictPtrTraits>(),
+                                total_points,
+                                start_point,
+                                b
+                        );
+                }
+
+                // counts and running_counts are automatically freed here
+        }
+
+        return {inv_neighbors.to(neighbor_inds.dtype()), 
+                inv_k.to(neighbor_inds.dtype()), 
+                inv_idx.to(neighbor_inds.dtype())};
 }

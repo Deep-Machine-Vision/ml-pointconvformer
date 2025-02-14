@@ -410,10 +410,10 @@ def test_knn_inv():
         return total_diff
 
 
-    B = 16          # batch size (meh!!)
-    N = 2048        # number of points 
+    B = 4          # batch size (meh!!)
+    N = 100000        # number of points 
     C_in = 3        # number of inp channels
-    K = 48          # number of neighbors
+    K = 100          # number of neighbors
     total_points = N
     num_runs = 100
 
@@ -568,6 +568,6 @@ def test_knn_inv():
 
 
 if __name__ == "__main__":
-    test_pconv_linear()
-    test_pconv_linear_with_memory()
+    # test_pconv_linear()
+    # test_pconv_linear_with_memory()
     test_knn_inv()
