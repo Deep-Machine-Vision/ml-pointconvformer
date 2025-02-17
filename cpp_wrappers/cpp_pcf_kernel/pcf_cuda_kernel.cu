@@ -40,7 +40,7 @@ __global__ void convert_to_half(
     
 
 __global__ void count_neighbors_kernel(
-        const torch::PackedTensorAccessor32<int32_t, 3, torch::RestrictPtrTraits> neighbor_inds,
+        const torch::PackedTensorAccessor32<int64_t, 3, torch::RestrictPtrTraits> neighbor_inds,
         torch::PackedTensorAccessor32<int32_t, 1, torch::RestrictPtrTraits> counts,
         const int total_points,
         const int start_point,
@@ -52,13 +52,12 @@ __global__ void count_neighbors_kernel(
         const int K = neighbor_inds.size(2);
 
         for (int k = tid; k < K; k += blockDim.x) {
-                const int32_t neighbor = neighbor_inds[batch_idx][point_idx][k];
+                const int64_t neighbor = neighbor_inds[batch_idx][point_idx][k];
                 if (neighbor >= 0 && neighbor < total_points) {
-                        atomicAdd(&counts[neighbor], 1);
+                        atomicAdd(&counts[static_cast<int32_t>(neighbor)], 1);
                 }
         }
 }
-    
 
 __global__ void compute_inv_idx_kernel(
         torch::PackedTensorAccessor32<int32_t, 1, torch::RestrictPtrTraits> counts,
@@ -75,7 +74,7 @@ __global__ void compute_inv_idx_kernel(
 }
 
 __global__ void fill_inverse_kernel(
-        const torch::PackedTensorAccessor32<int32_t, 3, torch::RestrictPtrTraits> neighbor_inds,
+        const torch::PackedTensorAccessor32<int64_t, 3, torch::RestrictPtrTraits> neighbor_inds,
         torch::PackedTensorAccessor32<int32_t, 2, torch::RestrictPtrTraits> inv_neighbors,
         torch::PackedTensorAccessor32<int32_t, 2, torch::RestrictPtrTraits> inv_k,
         torch::PackedTensorAccessor32<int32_t, 1, torch::RestrictPtrTraits> running_counts,
@@ -90,12 +89,15 @@ __global__ void fill_inverse_kernel(
         const int K = neighbor_inds.size(2);
 
         for (int k = tid; k < K; k += blockDim.x) {
-                const int32_t neighbor = neighbor_inds[batch_idx][point_idx][k];
+                const int64_t neighbor = neighbor_inds[batch_idx][point_idx][k];
                 if (neighbor >= 0 && neighbor < total_points) {
-                        const int32_t pos = atomicAdd(&running_counts[neighbor], 1);
-                        const int32_t idx = inv_idx[batch_idx][neighbor] + pos;
-                        inv_neighbors[batch_idx][idx] = point_idx;
-                        inv_k[batch_idx][idx] = k;
+                        const int32_t pos = atomicAdd(&running_counts[static_cast<int32_t>(neighbor)], 1);
+                        const int32_t idx = inv_idx[batch_idx][static_cast<int32_t>(neighbor)] + pos;
+
+                        if (idx < inv_neighbors.size(1)) {
+                                inv_neighbors[batch_idx][idx] = static_cast<int32_t>(point_idx);
+                                inv_k[batch_idx][idx] = static_cast<int32_t>(k);
+                        }
                 }
         }
 }
@@ -819,21 +821,18 @@ std::vector<torch::Tensor> knn_inverse_cuda_forward(
         const int N = neighbor_inds.size(1);
         const int K = neighbor_inds.size(2);
 
-        auto neighbor_inds_int32 = neighbor_inds.to(torch::kInt32);
-
         auto options = torch::TensorOptions().dtype(torch::kInt32).device(neighbor_inds.device());
         auto inv_neighbors = torch::zeros({B, N * K}, options);
         auto inv_k = torch::zeros({B, N * K}, options);
         auto inv_idx = torch::zeros({B, total_points + 1}, options);
 
-        const int threads_per_block = K;
+        const int threads_per_block = std::min(512, K);
         const int points_per_grid = 65535;
         const int num_y_grids = (N + points_per_grid - 1) / points_per_grid;
 
         for (int b = 0; b < B; b++) {
-                auto counts = torch::zeros({total_points}, options.dtype(torch::kInt32));
+                auto counts = torch::zeros({total_points}, options);
 
-                // Count neighbors
                 for (int grid_idx = 0; grid_idx < num_y_grids; grid_idx++) {
                         const int start_point = grid_idx * points_per_grid;
                         const int points_this_grid = std::min(points_per_grid, N - start_point);
@@ -841,7 +840,7 @@ std::vector<torch::Tensor> knn_inverse_cuda_forward(
                         const dim3 grid(1, points_this_grid);
 
                         count_neighbors_kernel<<<grid, block>>>(
-                                neighbor_inds_int32.packed_accessor32<int32_t, 3, torch::RestrictPtrTraits>(),
+                                neighbor_inds.packed_accessor32<int64_t, 3, torch::RestrictPtrTraits>(),
                                 counts.packed_accessor32<int32_t, 1, torch::RestrictPtrTraits>(),
                                 total_points,
                                 start_point,
@@ -849,7 +848,6 @@ std::vector<torch::Tensor> knn_inverse_cuda_forward(
                         );
                 }
 
-                // Compute inv_idx
                 compute_inv_idx_kernel<<<1, 1>>>(
                         counts.packed_accessor32<int32_t, 1, torch::RestrictPtrTraits>(),
                         inv_idx.packed_accessor32<int32_t, 2, torch::RestrictPtrTraits>(),
@@ -859,7 +857,6 @@ std::vector<torch::Tensor> knn_inverse_cuda_forward(
 
                 counts.zero_();
 
-                // Fill inverse mapping
                 for (int grid_idx = 0; grid_idx < num_y_grids; grid_idx++) {
                         const int start_point = grid_idx * points_per_grid;
                         const int points_this_grid = std::min(points_per_grid, N - start_point);
@@ -867,7 +864,7 @@ std::vector<torch::Tensor> knn_inverse_cuda_forward(
                         const dim3 grid(1, points_this_grid);
 
                         fill_inverse_kernel<<<grid, block>>>(
-                                neighbor_inds_int32.packed_accessor32<int32_t, 3, torch::RestrictPtrTraits>(),
+                                neighbor_inds.packed_accessor32<int64_t, 3, torch::RestrictPtrTraits>(),
                                 inv_neighbors.packed_accessor32<int32_t, 2, torch::RestrictPtrTraits>(),
                                 inv_k.packed_accessor32<int32_t, 2, torch::RestrictPtrTraits>(),
                                 counts.packed_accessor32<int32_t, 1, torch::RestrictPtrTraits>(),
