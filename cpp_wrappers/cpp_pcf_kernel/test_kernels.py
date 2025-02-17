@@ -411,9 +411,9 @@ def test_knn_inv():
 
 
     B = 4          # batch size (meh!!)
-    N = 100000        # number of points 
+    N = 200000        # number of points 
     C_in = 3        # number of inp channels
-    K = 100          # number of neighbors
+    K = 64         # number of neighbors
     total_points = N
     num_runs = 100
 
