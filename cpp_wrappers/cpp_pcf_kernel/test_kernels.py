@@ -377,7 +377,7 @@ def test_knn_inv():
         Compare outputs by sorting pairs within each segment defined by inv_idx
         """
         cuda_neighbors = cuda_neighbors.cpu().numpy()
-        cuda_k = cuda_k.cpu().numpy()
+        cuda_k = cuda_k.to(torch.int32).cpu().numpy()
         py_neighbors = py_neighbors.cpu().numpy()
         py_k = py_k.cpu().numpy()
         inv_idx = inv_idx.cpu().numpy()
