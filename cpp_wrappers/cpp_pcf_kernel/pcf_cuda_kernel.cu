@@ -589,6 +589,190 @@ __global__ void pconv_linear_cuda_backward_kernel(
         }
 }
 
+template <typename scalar_t>
+__global__ void pconv_linear_fused_cuda_backward_kernel_opt(
+        const torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> grad_output,
+        const torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> input,
+        const torch::PackedTensorAccessor32<int32_t, 2, torch::RestrictPtrTraits> inverse_neighbor,
+        const torch::PackedTensorAccessor32<uint8_t, 2, torch::RestrictPtrTraits> inverse_neighbor_k,
+        const torch::PackedTensorAccessor32<int32_t, 2, torch::RestrictPtrTraits> inverse_neighbor_idx,
+        const torch::PackedTensorAccessor32<long, 3, torch::RestrictPtrTraits> neighbor_inds,
+        const torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> weights,
+        const torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> additional_features,
+        const torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> linear_weights,
+        const torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> pconv_output,
+        torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> grad_input,
+        torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> grad_weights,
+        torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> grad_additional,
+        torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> grad_linear_weights,
+        torch::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> grad_linear_bias) 
+{
+        extern __shared__ unsigned char shared_memory[];
+        scalar_t* shared_grad_intermediate = reinterpret_cast<scalar_t*>(shared_memory);
+
+        const int B = input.size(0);
+        const int N = input.size(1);
+        const int Nout = neighbor_inds.size(1);
+        const int C_in = input.size(2);
+        const int K = neighbor_inds.size(2);
+        const int C_mid = weights.size(3);
+        const int C_add = additional_features.size(3);
+        const int C_out = grad_output.size(2);
+        const int total_channels = C_mid * (C_in + C_add);
+
+        const int batch_idx = blockIdx.x;
+        const int point_idx = blockIdx.y;
+        const int tid = threadIdx.x;
+
+        if (batch_idx >= B) return;
+
+        // We focus on output points first
+        if (point_idx < Nout) {
+                if (tid < C_out) {
+                        atomicAdd(&grad_linear_bias[tid], grad_output[batch_idx][point_idx][tid]);
+                }
+
+                for (int c = tid; c < total_channels; c += blockDim.x) {
+                        scalar_t sum = 0;
+                        for (int co = 0; co < C_out; co++) {
+                                sum += grad_output[batch_idx][point_idx][co] * linear_weights[co][c];
+                        }
+                        shared_grad_intermediate[c] = sum;
+                }
+
+                __syncthreads();
+
+                for (int idx = tid; idx < K * C_mid; idx += blockDim.x) {
+                        const int k = idx % K;
+                        const int mid_idx = idx / K;
+                        scalar_t weight_grad = 0;
+
+                        // Input features contribution
+                        const int n_idx = neighbor_inds[batch_idx][point_idx][k];
+                        if (n_idx >= 0 && n_idx < N) {
+                                for (int c_in = 0; c_in < C_in; c_in++) {
+                                        const int grad_idx = mid_idx * (C_in + C_add) + c_in;
+                                        weight_grad += shared_grad_intermediate[grad_idx] * input[batch_idx][n_idx][c_in];
+                                }
+                        }
+
+                        // Additional features contribution
+                        #pragma unroll 4
+                        for (int c_add = 0; c_add < C_add; c_add++) {
+                                const int grad_idx = mid_idx * (C_in + C_add) + C_in + c_add;
+                                weight_grad += shared_grad_intermediate[grad_idx] * 
+                                                additional_features[batch_idx][point_idx][k][c_add];
+                        }
+
+                        grad_weights[batch_idx][point_idx][k][mid_idx] = weight_grad;
+                }
+
+                for (int idx = tid; idx < K * C_add; idx += blockDim.x) {
+                        const int k = idx % K;
+                        const int c_add = idx / K;
+                        scalar_t add_grad = 0;
+
+                        #pragma unroll 4
+                        for (int mid_idx = 0; mid_idx < C_mid; mid_idx++) {
+                                const int grad_idx = mid_idx * (C_in + C_add) + C_in + c_add;
+                                add_grad += shared_grad_intermediate[grad_idx] * weights[batch_idx][point_idx][k][mid_idx];
+                        }
+
+                        grad_additional[batch_idx][point_idx][k][c_add] = add_grad;
+                }
+
+                for (int k = 0; k < K; k++) {
+                        const int n_idx = neighbor_inds[batch_idx][point_idx][k];
+                        if (n_idx >= 0 && n_idx < N) {
+                                for (int c_in = tid; c_in < C_in; c_in += blockDim.x) {
+                                        scalar_t input_grad = 0;
+
+                                        #pragma unroll 4
+                                        for (int mid_idx = 0; mid_idx < C_mid; mid_idx++) {
+                                                const int grad_idx = mid_idx * (C_in + C_add) + c_in;
+                                                input_grad += shared_grad_intermediate[grad_idx] * weights[batch_idx][point_idx][k][mid_idx];
+                                        }
+
+                                        atomicAdd(&grad_input[batch_idx][n_idx][c_in], input_grad);
+                                }
+                        }
+                }
+
+                const int linear_chunk_size = (total_channels + blockDim.x - 1) / blockDim.x;
+                const int start_idx = tid * linear_chunk_size;
+                const int end_idx = min(start_idx + linear_chunk_size, total_channels);
+
+                for (int c_out = 0; c_out < C_out; c_out++) {
+                        const scalar_t grad_out = grad_output[batch_idx][point_idx][c_out];
+
+                        for (int c = start_idx; c < end_idx; c++) {
+                                atomicAdd(&grad_linear_weights[c_out][c], 
+                                        grad_out * pconv_output[batch_idx][point_idx][c]);
+                        }
+                }
+        }
+
+        // For input-only points, we move to a separate kernel to reduce branch divergence and simplify control flow
+}
+
+template <typename scalar_t>
+__global__ void input_only_backward_kernel(
+        const torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> grad_output,
+        const torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> input,
+        const torch::PackedTensorAccessor32<int32_t, 2, torch::RestrictPtrTraits> inverse_neighbor,
+        const torch::PackedTensorAccessor32<uint8_t, 2, torch::RestrictPtrTraits> inverse_neighbor_k,
+        const torch::PackedTensorAccessor32<int32_t, 2, torch::RestrictPtrTraits> inverse_neighbor_idx,
+        const torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> weights,
+        const torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> linear_weights,
+        torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> grad_input,
+        const int N, const int Nout, const int C_in, const int C_mid, const int C_add, const int C_out)
+{
+        const int batch_idx = blockIdx.x;
+        const int point_idx = blockIdx.y + Nout;    // start from Nout
+        const int tid = threadIdx.x;
+
+        if (point_idx >= N) return;
+
+        int start_idx = inverse_neighbor_idx[batch_idx][point_idx];
+        if (start_idx == -1) return;        // No neighbors reference this point
+
+        int end_idx;
+        if (point_idx < N - 1) {
+                int next_idx = point_idx + 1;
+                while (next_idx < N && inverse_neighbor_idx[batch_idx][next_idx] == -1) {
+                        next_idx++;
+                }
+                end_idx = (next_idx < N) ? inverse_neighbor_idx[batch_idx][next_idx] : 
+                                                inverse_neighbor.size(1);
+        } else {
+                end_idx = inverse_neighbor.size(1);
+        }
+
+        for (int c_in = tid; c_in < C_in; c_in += blockDim.x) {
+                scalar_t grad_sum = 0;
+
+                for (int inv_idx = start_idx; inv_idx < end_idx; inv_idx++) {
+                        const int n_out = inverse_neighbor[batch_idx][inv_idx];
+                        const int k_idx = inverse_neighbor_k[batch_idx][inv_idx];
+
+                        for (int mid_idx = 0; mid_idx < C_mid; mid_idx++) {
+                                const int pconv_idx = mid_idx * (C_in + C_add) + c_in;
+
+                                scalar_t grad_through_linear = 0;
+                                #pragma unroll 4
+                                for (int c_out = 0; c_out < C_out; c_out++) {
+                                        grad_through_linear += grad_output[batch_idx][n_out][c_out] * 
+                                                        linear_weights[c_out][pconv_idx];
+                                }
+
+                                grad_sum += grad_through_linear * weights[batch_idx][n_out][k_idx][mid_idx];
+                        }
+                }
+
+                grad_input[batch_idx][point_idx][c_in] = grad_sum;
+        }
+}
+
 torch::Tensor pcf_cuda_forward(
     torch::Tensor input,
     torch::Tensor neighbor_inds,
@@ -877,4 +1061,81 @@ std::vector<torch::Tensor> knn_inverse_cuda_forward(
         }
 
         return {inv_neighbors, inv_k, inv_idx};
+}
+
+std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
+        torch::Tensor grad_output,
+        torch::Tensor input,
+        torch::Tensor inverse_neighbor,
+        torch::Tensor inverse_neighbor_k,
+        torch::Tensor inverse_neighbor_idx,
+        torch::Tensor neighbor_inds,
+        torch::Tensor weights,
+        torch::Tensor additional_features,
+        torch::Tensor linear_weights,
+        torch::Tensor pconv_output)
+{
+        const int B = input.size(0);
+        const int N = input.size(1);
+        const int Nout = neighbor_inds.size(1);
+        const int C_in = input.size(2);
+        const int K = neighbor_inds.size(2);
+        const int C_mid = weights.size(3);
+        const int C_add = additional_features.size(3);
+        const int C_out = grad_output.size(2);
+
+        auto grad_input = torch::zeros_like(input);
+        auto grad_weights = torch::zeros_like(weights);
+        auto grad_additional = torch::zeros_like(additional_features);
+        auto grad_linear_weights = torch::zeros_like(linear_weights);
+        auto grad_linear_bias = torch::zeros({C_out}, input.options());
+
+        const int max_threads_per_block = 512;
+        const int total_work = std::max({C_in, K * C_mid, K * C_add, C_out});
+        const int thread_count = std::min(max_threads_per_block, nextPowerOf2(total_work));
+
+        const int shared_mem_size = (C_mid * (C_in + C_add)) * sizeof(float);
+
+        // Main kernel for output points (0 to Nout-1)
+        {
+                dim3 grid(B, Nout);
+                AT_DISPATCH_FLOATING_TYPES(grad_output.type(), "pconv_linear_fused_cuda_backward_kernel_opt", ([&] {
+                pconv_linear_fused_cuda_backward_kernel_opt<scalar_t><<<grid, thread_count, shared_mem_size>>>(
+                        grad_output.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+                        input.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+                        inverse_neighbor.packed_accessor32<int32_t, 2, torch::RestrictPtrTraits>(),
+                        inverse_neighbor_k.packed_accessor32<uint8_t, 2, torch::RestrictPtrTraits>(),
+                        inverse_neighbor_idx.packed_accessor32<int32_t, 2, torch::RestrictPtrTraits>(),
+                        neighbor_inds.packed_accessor32<long, 3, torch::RestrictPtrTraits>(),
+                        weights.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+                        additional_features.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+                        linear_weights.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
+                        pconv_output.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+                        grad_input.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+                        grad_weights.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+                        grad_additional.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+                        grad_linear_weights.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
+                        grad_linear_bias.packed_accessor32<scalar_t, 1, torch::RestrictPtrTraits>());
+                }));
+        }
+
+        // We launch a separate kernel for input-only points (Nout to N-1)
+        if (N > Nout) {
+                const int input_only_points = N - Nout;
+                dim3 grid(B, input_only_points);
+                AT_DISPATCH_FLOATING_TYPES(grad_output.type(), "input_only_backward_kernel", ([&] {
+                input_only_backward_kernel<scalar_t><<<grid, thread_count>>>(
+                        grad_output.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+                        input.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+                        inverse_neighbor.packed_accessor32<int32_t, 2, torch::RestrictPtrTraits>(),
+                        inverse_neighbor_k.packed_accessor32<uint8_t, 2, torch::RestrictPtrTraits>(),
+                        inverse_neighbor_idx.packed_accessor32<int32_t, 2, torch::RestrictPtrTraits>(),
+                        weights.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+                        linear_weights.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
+                        grad_input.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+                        N, Nout, C_in, C_mid, C_add, C_out);
+                }));
+        }
+
+        return {grad_input, grad_weights, grad_additional, grad_linear_weights, grad_linear_bias};
 }

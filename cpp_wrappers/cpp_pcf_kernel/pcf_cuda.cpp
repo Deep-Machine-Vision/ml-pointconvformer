@@ -57,6 +57,18 @@ std::vector<torch::Tensor> pcf_cuda_backward(
     torch::Tensor neighbor_inds,
     torch::Tensor guidance,
     torch::Tensor weights);
+
+std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
+    torch::Tensor grad_output,
+    torch::Tensor input,
+    torch::Tensor inverse_neighbor,
+    torch::Tensor inverse_neighbor_k,
+    torch::Tensor inverse_neighbor_idx,
+    torch::Tensor neighbor_inds,
+    torch::Tensor weights,
+    torch::Tensor additional_features,
+    torch::Tensor linear_weights,
+    torch::Tensor pconv_output);
     
 #define CHECK_CUDA(x) {TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")}
 #define CHECK_CONTIGUOUS(x) {TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")}
@@ -168,6 +180,35 @@ std::vector<torch::Tensor> compute_knn_inverse(
     return knn_inverse_cuda_forward(neighbor_inds, total_points);
 }
 
+std::vector<torch::Tensor> pconv_linear_opt_backward(
+    torch::Tensor grad_output,
+    torch::Tensor input,
+    torch::Tensor inverse_neighbor,
+    torch::Tensor inverse_neighbor_k,
+    torch::Tensor inverse_neighbor_idx,
+    torch::Tensor neighbor_inds,
+    torch::Tensor weights,
+    torch::Tensor additional_features,
+    torch::Tensor linear_weights,
+    torch::Tensor pconv_output)
+{
+    CHECK_INPUT(grad_output);
+    CHECK_INPUT(input);
+    CHECK_INPUT(inverse_neighbor);
+    CHECK_INPUT(inverse_neighbor_k);
+    CHECK_INPUT(inverse_neighbor_idx);
+    CHECK_INPUT(neighbor_inds);
+    CHECK_INPUT(weights);
+    CHECK_INPUT(additional_features);
+    CHECK_INPUT(linear_weights);
+    CHECK_INPUT(pconv_output);
+
+    return pconv_linear_opt_cuda_backward(
+        grad_output, input, inverse_neighbor, inverse_neighbor_k, 
+        inverse_neighbor_idx, neighbor_inds, weights, additional_features,
+        linear_weights, pconv_output);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pcf_forward", &pcf_forward, "PCF forward (CUDA)");
   m.def("pcf_backward", &pcf_backward, "PCF backward (CUDA)");
@@ -175,5 +216,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pconv_linear_forward", &pconv_linear_forward, "Fused PointConv+Linear forward (CUDA)");
   m.def("pconv_backward", &pconv_backward, "PointConv backward (CUDA)");
   m.def("pconv_linear_backward", &pconv_linear_backward, "Fused PointConv+Linear backward (CUDA)");
+  m.def("pconv_linear_opt_backward", &pconv_linear_opt_backward, "Optimized Fused PointConv+Linear backward (CUDA)");
   m.def("compute_knn_inverse", &compute_knn_inverse, "Compute KNN inverse mapping (CUDA)");
 }

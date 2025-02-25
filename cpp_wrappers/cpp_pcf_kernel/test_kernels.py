@@ -65,6 +65,49 @@ class PConvLinear(torch.nn.Module):
         return PConvLinearFunction.apply(input_features, neighbor_inds, weightnet, additional_features,
                                        self.linear.weight, self.linear.bias)
 
+class PConvLinearOptFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input_feat, neighbor_inds, weightnet, additional_features, linear_weights, linear_bias):
+        neighbor_inds.requires_grad = False
+
+        inverse_neighbors, inverse_k, inverse_idx = pcf_cuda.compute_knn_inverse(
+            neighbor_inds, input_feat.shape[1])
+
+        output, pconv_output = pcf_cuda.pconv_linear_forward(
+            input_feat, neighbor_inds, weightnet, additional_features, 
+            linear_weights, linear_bias)
+
+        ctx.save_for_backward(input_feat, inverse_neighbors, inverse_k, inverse_idx, 
+                            neighbor_inds, weightnet, additional_features, 
+                            linear_weights, pconv_output)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        saved = ctx.saved_tensors
+        input_feat, inverse_neighbors, inverse_k, inverse_idx, neighbor_inds, \
+        weightnet, additional_features, linear_weights, pconv_output = saved
+
+        grad_output = grad_output.contiguous()
+
+        grads = pcf_cuda.pconv_linear_opt_backward(
+            grad_output, input_feat, inverse_neighbors, inverse_k, 
+            inverse_idx, neighbor_inds, weightnet, additional_features,
+            linear_weights, pconv_output)
+
+        return grads[0], None, grads[1], grads[2], grads[3], grads[4]
+
+class PConvLinearOpt(torch.nn.Module):
+    def __init__(self, in_features, out_features):
+        super(PConvLinearOpt, self).__init__()
+        self.linear = torch.nn.Linear(in_features, out_features)
+
+    def forward(self, input_features, neighbor_inds, weightnet, additional_features=None):
+        if additional_features is None:
+            additional_features = torch.zeros(input_features.shape[0], input_features.shape[1], 
+                                          neighbor_inds.shape[2], 0, device=input_features.device)
+        return PConvLinearOptFunction.apply(input_features, neighbor_inds, weightnet, additional_features,
+                                         self.linear.weight, self.linear.bias)
 
 def test_pconv_linear():
     path = "/nfs/stak/users/sivakuml/hpc-memory/cutlass/data/500000pts"
@@ -567,7 +610,287 @@ def test_knn_inv():
         print("All segments match after sorting :)")
 
 
+def test_pconv_linear_opt():
+    path = "/nfs/stak/users/sivakuml/hpc-memory/cutlass/data/500000pts"
+    device = torch.device("cuda")
+    
+    feats_x = torch.load(f"{path}/feat_x.pt").to(device).contiguous()
+    nei_inds = torch.load(f"{path}/nei_inds.pt").to(device).contiguous()
+    weights = torch.load(f"{path}/weights.pt").to(device).contiguous()
+    feat_pe = torch.load(f"{path}/feat_pe.pt").to(device).contiguous()
+    linear_weights = torch.load(f"{path}/linear_weights.pt").to(device).contiguous()
+    linear_bias = torch.load(f"{path}/linear_bias.pt").to(device).contiguous()
+
+    out_channel = 64
+    last_ch = 16
+    weightnet_dim = 16
+
+    # Unfused
+    pconv = PConv()
+    linear_layer = torch.nn.Linear((out_channel // 4 + last_ch) * weightnet_dim, out_channel // 2).to(device)
+    linear_layer.weight.data.copy_(linear_weights)
+    linear_layer.bias.data.copy_(linear_bias)
+
+    # PConvLinear
+    pconv_linear = PConvLinear((out_channel // 4 + last_ch) * weightnet_dim, out_channel // 2)
+    pconv_linear.linear.weight.data.copy_(linear_weights)
+    pconv_linear.linear.bias.data.copy_(linear_bias)
+    pconv_linear = pconv_linear.cuda()
+
+    # Optimized PConvLinear
+    pconv_linear_opt = PConvLinearOpt((out_channel // 4 + last_ch) * weightnet_dim, out_channel // 2)
+    pconv_linear_opt.linear.weight.data.copy_(linear_weights)
+    pconv_linear_opt.linear.bias.data.copy_(linear_bias)
+    pconv_linear_opt = pconv_linear_opt.cuda()
+
+    # dummy gradient
+    grad_output = torch.randn_like(pconv_linear.linear(torch.empty(feats_x.shape[0], feats_x.shape[1], 
+                                              (out_channel // 4 + last_ch) * weightnet_dim, device=device)))
+
+    # -------------- Correctness Check ---------------
+    # Forward & Backward (Unfused)
+    pconv_out = pconv(feats_x, nei_inds, weights, feat_pe)
+    out_unfused = linear_layer(pconv_out)
+    out_unfused.backward(grad_output)
+
+    torch.cuda.synchronize()
+
+    unfused_grads = {
+        "input": feats_x.grad.clone(),
+        "weightnet": weights.grad.clone(),
+        "additional": feat_pe.grad.clone(),
+        "linear_weight": linear_layer.weight.grad.clone(),
+        "linear_bias": linear_layer.bias.grad.clone()
+    }
+
+    feats_x.grad = None
+    weights.grad = None
+    feat_pe.grad = None
+    linear_layer.weight.grad = None
+    linear_layer.bias.grad = None
+
+    # Forward & Backward (Regular Fused)
+    out_fused = pconv_linear(feats_x, nei_inds, weights, feat_pe)
+    out_fused.backward(grad_output)
+
+    torch.cuda.synchronize()
+
+    regular_fused_grads = {
+        "input": feats_x.grad.clone(),
+        "weightnet": weights.grad.clone(),
+        "additional": feat_pe.grad.clone(),
+        "linear_weight": pconv_linear.linear.weight.grad.clone(),
+        "linear_bias": pconv_linear.linear.bias.grad.clone()
+    }
+
+    feats_x.grad = None
+    weights.grad = None
+    feat_pe.grad = None
+    pconv_linear.linear.weight.grad = None
+    pconv_linear.linear.bias.grad = None
+
+    # Forward & Backward (Optimized Fused)
+    out_opt_fused = pconv_linear_opt(feats_x, nei_inds, weights, feat_pe)
+    out_opt_fused.backward(grad_output)
+
+    torch.cuda.synchronize()
+
+    opt_fused_grads = {
+        "input": feats_x.grad.clone(),
+        "weightnet": weights.grad.clone(),
+        "additional": feat_pe.grad.clone(),
+        "linear_weight": pconv_linear_opt.linear.weight.grad.clone(),
+        "linear_bias": pconv_linear_opt.linear.bias.grad.clone()
+    }
+
+
+    print("\n---------- Correctness Check ----------")
+    print("Forward output differences:")
+    print("  Unfused vs Regular Fused:", torch.max(torch.abs(out_unfused - out_fused)).item())
+    print("  Unfused vs Optimized Fused:", torch.max(torch.abs(out_unfused - out_opt_fused)).item())
+    print("  Regular Fused vs Optimized Fused:", torch.max(torch.abs(out_fused - out_opt_fused)).item())
+
+    print("\nGradient differences (max absolute error):")
+    for key in unfused_grads:
+        diff_unfused_reg = torch.max(torch.abs(unfused_grads[key] - regular_fused_grads[key])).item()
+        diff_unfused_opt = torch.max(torch.abs(unfused_grads[key] - opt_fused_grads[key])).item()
+        diff_reg_opt = torch.max(torch.abs(regular_fused_grads[key] - opt_fused_grads[key])).item()
+
+        print(f"\n{key:13} grad differences:")
+        print(f"  Unfused vs Regular Fused: {diff_unfused_reg:.6f}")
+        print(f"  Unfused vs Optimized Fused: {diff_unfused_opt:.6f}")
+        print(f"  Regular Fused vs Optimized Fused: {diff_reg_opt:.6f}")
+
+        print(f"{key:13} stats:")
+        print(f"  Unfused    - min: {unfused_grads[key].min().item():.6f}, max: {unfused_grads[key].max().item():.6f}, mean: {unfused_grads[key].mean().item():.6f}")
+        print(f"  Reg Fused  - min: {regular_fused_grads[key].min().item():.6f}, max: {regular_fused_grads[key].max().item():.6f}, mean: {regular_fused_grads[key].mean().item():.6f}")
+        print(f"  Opt Fused  - min: {opt_fused_grads[key].min().item():.6f}, max: {opt_fused_grads[key].max().item():.6f}, mean: {opt_fused_grads[key].mean().item():.6f}")
+
+
+    print("\n---------- Performance Benchmarking ----------")
+    num_runs = 100
+    torch.cuda.synchronize()
+
+    # Unfused
+    total_time_forward = 0
+    total_time_backward = 0
+    for _ in range(num_runs):
+        torch.cuda.synchronize()
+        start = time.time()
+        pconv_out = pconv(feats_x, nei_inds, weights, feat_pe)
+        out_unfused = linear_layer(pconv_out)
+        torch.cuda.synchronize()
+        total_time_forward += (time.time() - start)
+
+        feats_x.grad = None
+        weights.grad = None
+        feat_pe.grad = None
+        linear_layer.weight.grad = None
+        linear_layer.bias.grad = None
+
+        torch.cuda.synchronize()
+        start = time.time()
+        out_unfused.backward(grad_output, retain_graph=True)
+        torch.cuda.synchronize()
+        total_time_backward += (time.time() - start)
+
+    print(f"(Unfused) Average Forward Time: {(total_time_forward / num_runs) * 1000:.2f} ms")
+    print(f"(Unfused) Average Backward Time: {(total_time_backward / num_runs) * 1000:.2f} ms")
+    print(f"(Unfused) Average Total Time: {((total_time_forward + total_time_backward) / num_runs) * 1000:.2f} ms")
+
+    # Regular fused
+    total_time_forward = 0
+    total_time_backward = 0
+    for _ in range(num_runs):
+        torch.cuda.synchronize()
+        start = time.time()
+        out_fused = pconv_linear(feats_x, nei_inds, weights, feat_pe)
+        torch.cuda.synchronize()
+        total_time_forward += (time.time() - start)
+
+        feats_x.grad = None
+        weights.grad = None
+        feat_pe.grad = None
+        pconv_linear.linear.weight.grad = None
+        pconv_linear.linear.bias.grad = None
+
+        torch.cuda.synchronize()
+        start = time.time()
+        out_fused.backward(grad_output, retain_graph=True)
+        torch.cuda.synchronize()
+        total_time_backward += (time.time() - start)
+
+    print(f"(Regular Fused) Average Forward Time: {(total_time_forward / num_runs) * 1000:.2f} ms")
+    print(f"(Regular Fused) Average Backward Time: {(total_time_backward / num_runs) * 1000:.2f} ms")
+    print(f"(Regular Fused) Average Total Time: {((total_time_forward + total_time_backward) / num_runs) * 1000:.2f} ms")
+
+    # Optimized fused
+    total_time_forward = 0
+    total_time_backward = 0
+    for _ in range(num_runs):
+        torch.cuda.synchronize()
+        start = time.time()
+        out_opt_fused = pconv_linear_opt(feats_x, nei_inds, weights, feat_pe)
+        torch.cuda.synchronize()
+        total_time_forward += (time.time() - start)
+
+        feats_x.grad = None
+        weights.grad = None
+        feat_pe.grad = None
+        pconv_linear_opt.linear.weight.grad = None
+        pconv_linear_opt.linear.bias.grad = None
+
+        torch.cuda.synchronize()
+        start = time.time()
+        out_opt_fused.backward(grad_output, retain_graph=True)
+        torch.cuda.synchronize()
+        total_time_backward += (time.time() - start)
+
+    print(f"(Optimized Fused) Average Forward Time: {(total_time_forward / num_runs) * 1000:.2f} ms")
+    print(f"(Optimized Fused) Average Backward Time: {(total_time_backward / num_runs) * 1000:.2f} ms")
+    print(f"(Optimized Fused) Average Total Time: {((total_time_forward + total_time_backward) / num_runs) * 1000:.2f} ms")
+
+
+    print("\n---------- Memory Usage Test ----------")
+    # Unfused
+    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.synchronize()
+    mem_before = torch.cuda.memory_allocated()
+
+    # Forward
+    pconv_out = pconv(feats_x, nei_inds, weights, feat_pe)
+    torch.cuda.synchronize()
+    mem_after_pconv = torch.cuda.memory_allocated()
+
+    out_unfused = linear_layer(pconv_out)
+    torch.cuda.synchronize()
+    mem_after_linear = torch.cuda.memory_allocated()
+
+    # Backward
+    out_unfused.backward(grad_output)
+    torch.cuda.synchronize()
+    unfused_peak = torch.cuda.max_memory_allocated()
+
+    print(f"\nUnfused Memory Usage (MB):")
+    print(f"  PConv allocation: {(mem_after_pconv - mem_before) / 1024**2:.2f}")
+    print(f"  Total forward allocation: {(mem_after_linear - mem_before) / 1024**2:.2f}")
+    print(f"  Peak memory: {unfused_peak / 1024**2:.2f}")
+    print(f"  Additional memory for backward: {(unfused_peak - mem_after_linear) / 1024**2:.2f}")
+
+    feats_x.grad = None
+    weights.grad = None
+    feat_pe.grad = None
+    linear_layer.weight.grad = None
+    linear_layer.bias.grad = None
+    torch.cuda.empty_cache()
+
+    def test_memory_usage(model, name):
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+        mem_before = torch.cuda.memory_allocated()
+
+        # Forward
+        out = model(feats_x, nei_inds, weights, feat_pe)
+        torch.cuda.synchronize()
+        mem_after_forward = torch.cuda.memory_allocated()
+
+        # Backward
+        out.backward(grad_output)
+        torch.cuda.synchronize()
+        mem_peak = torch.cuda.max_memory_allocated()
+
+        print(f"\n{name} Memory Usage (MB):")
+        print(f"  Forward allocation: {(mem_after_forward - mem_before) / 1024**2:.2f}")
+        print(f"  Peak memory: {mem_peak / 1024**2:.2f}")
+        print(f"  Additional memory for backward: {(mem_peak - mem_after_forward) / 1024**2:.2f}")
+
+        feats_x.grad = None
+        weights.grad = None
+        feat_pe.grad = None
+        model.linear.weight.grad = None
+        model.linear.bias.grad = None
+        torch.cuda.empty_cache()
+
+        return mem_peak
+
+    reg_peak = test_memory_usage(pconv_linear, "Regular Fused")
+    opt_peak = test_memory_usage(pconv_linear_opt, "Optimized Fused")
+
+    print("\n---------- Memory Reduction ----------")
+    print(f"Unfused vs Regular Fused: {(unfused_peak - reg_peak) / 1024**2:.2f} MB ({100 * (1 - reg_peak/unfused_peak):.2f}%)")
+    print(f"Unfused vs Optimized Fused: {(unfused_peak - opt_peak) / 1024**2:.2f} MB ({100 * (1 - opt_peak/unfused_peak):.2f}%)")
+    print(f"Regular Fused vs Optimized Fused: {(reg_peak - opt_peak) / 1024**2:.2f} MB ({100 * (1 - opt_peak/reg_peak):.2f}%)")
+
+    print("\nTensor Shapes:")
+    print(f"  Input features: {feats_x.shape}")
+    print(f"  Neighbor indices: {nei_inds.shape}")
+    print(f"  Weights: {weights.shape}")
+    print(f"  Additional features: {feat_pe.shape}")
+    print(f"  Linear weights: {linear_weights.shape}")
+
+
 if __name__ == "__main__":
     # test_pconv_linear()
     # test_pconv_linear_with_memory()
-    test_knn_inv()
+    # test_knn_inv()
+    test_pconv_linear_opt()
