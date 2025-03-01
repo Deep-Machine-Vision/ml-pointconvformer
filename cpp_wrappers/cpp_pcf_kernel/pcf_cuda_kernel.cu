@@ -283,9 +283,12 @@ __global__ void pconv_linear_cuda_forward_kernel(
         const int C_mid = weights.size(3);
         const int C_add = additional_features.size(3);
         const int C_out = linear_weights.size(0);
-        
-        const int batch_idx = blockIdx.x / gridDim.y;   // Current batch
-        const int point_idx = blockIdx.y;               // Current point in point cloud
+
+        const int Nout = neighbor_inds.size(1);
+        const int total_blocks = gridDim.x;
+        const int iter = blockIdx.x;
+        const int batch_idx = iter / Nout;              // Current batch
+        const int point_idx = iter % Nout;              // Current point in point cloud
         const int tid = threadIdx.x;                    // Thread ID within block
         const int warp_id = tid / 32;                   // Warp ID (32 threads per warp)
         const int lane_id = tid % 32;                   // Lane ID within the warp
@@ -521,8 +524,10 @@ __global__ void pconv_linear_cuda_backward_kernel(
         const int C_out = grad_output.size(2);
         const int total_channels = C_mid * (C_in + C_add);
 
-        const int batch_idx = blockIdx.x;
-        const int point_idx = blockIdx.y;
+        const int total_blocks = gridDim.x;
+        const int iter = blockIdx.x;
+        const int batch_idx = iter / Nout;
+        const int point_idx = iter % Nout;
         const int tid = threadIdx.x;
         const int increment = blockDim.x / C_mid;
 
@@ -620,8 +625,10 @@ __global__ void pconv_linear_fused_cuda_backward_kernel_opt(
         const int C_out = grad_output.size(2);
         const int total_channels = C_mid * (C_in + C_add);
 
-        const int batch_idx = blockIdx.x;
-        const int point_idx = blockIdx.y;
+        const int total_blocks = gridDim.x;
+        const int iter = blockIdx.x;
+        const int batch_idx = iter / Nout;
+        const int point_idx = iter % Nout;
         const int tid = threadIdx.x;
 
         if (batch_idx >= B) return;
@@ -725,10 +732,11 @@ __global__ void input_only_backward_kernel(
         const torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> weights,
         const torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> linear_weights,
         torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> grad_input,
-        const int N, const int Nout, const int C_in, const int C_mid, const int C_add, const int C_out)
+        const int N, const int Nout, const int C_in, const int C_mid, const int C_add, const int C_out, const int input_only_points)
 {
-        const int batch_idx = blockIdx.x;
-        const int point_idx = blockIdx.y + Nout;    // start from Nout
+        const int iter = blockIdx.x;
+        const int batch_idx = iter / input_only_points;
+        const int point_idx = Nout + (iter % input_only_points);    // start from Nout
         const int tid = threadIdx.x;
 
         if (point_idx >= N) return;
@@ -889,7 +897,8 @@ std::vector<torch::Tensor> pconv_linear_cuda_forward(
         const int total_work = std::max({K * C_in, K * C_add, K * C_mid, C_out});
         const int thread_count = std::min(256, nextPowerOf2(total_work));
 
-        dim3 grid(B, Nout);
+        const int total_blocks = B * Nout;
+        dim3 grid(total_blocks);
 
         const int shared_mem_size = (
                 (K * C_in) +                    // shared_input
@@ -973,7 +982,8 @@ std::vector<torch::Tensor> pconv_linear_cuda_backward(
         const int total_work = std::max({K * C_in, K * C_add, K * C_mid, C_out});
         const int thread_count = std::min(256, nextPowerOf2(total_work));
 
-        dim3 grid(B, Nout);
+        const int total_blocks = B * Nout;
+        dim3 grid(total_blocks);
 
         const int shared_mem_size = (C_mid * (C_in + C_add)) * sizeof(float);
 
@@ -1098,7 +1108,8 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
 
         // Main kernel for output points (0 to Nout-1)
         {
-                dim3 grid(B, Nout);
+                const int total_blocks_main = B * Nout;
+                dim3 grid(total_blocks_main);
                 AT_DISPATCH_FLOATING_TYPES(grad_output.type(), "pconv_linear_fused_cuda_backward_kernel_opt", ([&] {
                 pconv_linear_fused_cuda_backward_kernel_opt<scalar_t><<<grid, thread_count, shared_mem_size>>>(
                         grad_output.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
@@ -1122,7 +1133,8 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
         // We launch a separate kernel for input-only points (Nout to N-1)
         if (N > Nout) {
                 const int input_only_points = N - Nout;
-                dim3 grid(B, input_only_points);
+                const int total_blocks_input = B * input_only_points;
+                dim3 grid(total_blocks_input);
                 AT_DISPATCH_FLOATING_TYPES(grad_output.type(), "input_only_backward_kernel", ([&] {
                 input_only_backward_kernel<scalar_t><<<grid, thread_count>>>(
                         grad_output.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
@@ -1133,7 +1145,7 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
                         weights.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
                         linear_weights.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
                         grad_input.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
-                        N, Nout, C_in, C_mid, C_add, C_out);
+                        N, Nout, C_in, C_mid, C_add, C_out, input_only_points);
                 }));
         }
 
