@@ -1,3 +1,4 @@
+import gc
 import time
 import matplotlib.pyplot as plt
 import numpy as np
@@ -68,11 +69,9 @@ class PConvLinear(torch.nn.Module):
 
 class PConvLinearOptFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input_feat, neighbor_inds, weightnet, additional_features, linear_weights, linear_bias):
+    def forward(ctx, input_feat, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx,
+                        weightnet, additional_features, linear_weights, linear_bias):
         neighbor_inds.requires_grad = False
-
-        inverse_neighbors, inverse_k, inverse_idx = pcf_cuda.compute_knn_inverse(
-            neighbor_inds, input_feat.shape[1])
 
         output, pconv_output = pcf_cuda.pconv_linear_forward(
             input_feat, neighbor_inds, weightnet, additional_features, 
@@ -96,19 +95,19 @@ class PConvLinearOptFunction(torch.autograd.Function):
             inverse_idx, neighbor_inds, weightnet, additional_features,
             linear_weights, pconv_output)
 
-        return grads[0], None, grads[1], grads[2], grads[3], grads[4]
+        return grads[0], None, None, None, None, grads[1], grads[2], grads[3], grads[4]
 
 class PConvLinearOpt(torch.nn.Module):
     def __init__(self, in_features, out_features):
         super(PConvLinearOpt, self).__init__()
         self.linear = torch.nn.Linear(in_features, out_features)
 
-    def forward(self, input_features, neighbor_inds, weightnet, additional_features=None):
+    def forward(self, input_features, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx, weightnet, additional_features=None):
         if additional_features is None:
             additional_features = torch.zeros(input_features.shape[0], input_features.shape[1], 
                                           neighbor_inds.shape[2], 0, device=input_features.device)
-        return PConvLinearOptFunction.apply(input_features, neighbor_inds, weightnet, additional_features,
-                                         self.linear.weight, self.linear.bias)
+        return PConvLinearOptFunction.apply(input_features, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx,
+                                                weightnet, additional_features, self.linear.weight, self.linear.bias)
 
 
 def knn(pts1, pts2, k):
@@ -637,6 +636,8 @@ def test_pconv_linear_opt():
     linear_weights = torch.load(f"{path}/linear_weights.pt").to(device).contiguous()
     linear_bias = torch.load(f"{path}/linear_bias.pt").to(device).contiguous()
 
+    inverse_neighbors, inverse_k, inverse_idx = pcf_cuda.compute_knn_inverse(nei_inds, feats_x.shape[1])
+
     out_channel = 64
     last_ch = 16
     weightnet_dim = 16
@@ -706,7 +707,7 @@ def test_pconv_linear_opt():
     pconv_linear.linear.bias.grad = None
 
     # Forward & Backward (Optimized Fused)
-    out_opt_fused = pconv_linear_opt(feats_x, nei_inds, weights, feat_pe)
+    out_opt_fused = pconv_linear_opt(feats_x, nei_inds, inverse_neighbors, inverse_k, inverse_idx, weights, feat_pe)
     out_opt_fused.backward(grad_output)
 
     torch.cuda.synchronize()
@@ -806,7 +807,7 @@ def test_pconv_linear_opt():
     for _ in range(num_runs):
         torch.cuda.synchronize()
         start = time.time()
-        out_opt_fused = pconv_linear_opt(feats_x, nei_inds, weights, feat_pe)
+        out_opt_fused = pconv_linear_opt(feats_x, nei_inds, inverse_neighbors, inverse_k, inverse_idx, weights, feat_pe)
         torch.cuda.synchronize()
         total_time_forward += (time.time() - start)
 
@@ -860,13 +861,16 @@ def test_pconv_linear_opt():
     linear_layer.bias.grad = None
     torch.cuda.empty_cache()
 
-    def test_memory_usage(model, name):
+    def test_memory_usage(model, name, inverse_neighbors=None, inverse_k=None, inverse_idx=None):
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
         mem_before = torch.cuda.memory_allocated()
 
         # Forward
-        out = model(feats_x, nei_inds, weights, feat_pe)
+        if inverse_neighbors is not None:
+            out = model(feats_x, nei_inds, inverse_neighbors, inverse_k, inverse_idx, weights, feat_pe)
+        else:
+            out = model(feats_x, nei_inds, weights, feat_pe)
         torch.cuda.synchronize()
         mem_after_forward = torch.cuda.memory_allocated()
 
@@ -890,7 +894,7 @@ def test_pconv_linear_opt():
         return mem_peak
 
     reg_peak = test_memory_usage(pconv_linear, "Regular Fused")
-    opt_peak = test_memory_usage(pconv_linear_opt, "Optimized Fused")
+    opt_peak = test_memory_usage(pconv_linear_opt, "Optimized Fused", inverse_neighbors, inverse_k, inverse_idx)
 
     print("\n---------- Memory Reduction ----------")
     print(f"Unfused vs Regular Fused: {(unfused_peak - reg_peak) / 1024**2:.2f} MB ({100 * (1 - reg_peak/unfused_peak):.2f}%)")
@@ -941,9 +945,12 @@ def test_pconv_linear_opt_random(point_sizes=[50000, 100000, 200000], K=64, num_
         input_points = torch.randn(B, n_points, 3, device=device, requires_grad=True)
         input_features = torch.randn(B, n_points, C_in, device=device, requires_grad=True)
 
-        print("Calculating KNN indices...")
+        print("Calculating KNN indices and Inverse indices...")
         neighbor_inds = knn(input_points, input_points, K).contiguous()
+        inverse_neighbors, inverse_k, inverse_idx = pcf_cuda.compute_knn_inverse(neighbor_inds, input_features.shape[1])
+        torch.cuda.synchronize()
         print(f"KNN indices shape: {neighbor_inds.shape}")
+        print(f"KNN inverse indices shape: inv nei-{inverse_neighbors.shape}, inv k-{inverse_k.shape}, inv idx-{inverse_idx.shape}")
 
         weights = torch.randn(B, n_points, K, C_mid, device=device, requires_grad=True)
         additional_features = torch.randn(B, n_points, K, C_add, device=device, requires_grad=True)
@@ -993,7 +1000,8 @@ def test_pconv_linear_opt_random(point_sizes=[50000, 100000, 200000], K=64, num_
             pconv_linear.linear.bias.grad = None
 
             # Optimized fused
-            out_opt_fused = pconv_linear_opt(input_features, neighbor_inds, weights, additional_features)
+            out_opt_fused = pconv_linear_opt(input_features, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx,
+                                                weights, additional_features)
             out_opt_fused.backward(grad_output)
 
             input_features.grad = None
@@ -1012,6 +1020,8 @@ def test_pconv_linear_opt_random(point_sizes=[50000, 100000, 200000], K=64, num_
             print(f"Run {r+1}/{num_runs}")
 
             # ----- Unfused -----
+            torch.cuda.empty_cache()
+            gc.collect()
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.synchronize()
             mem_before = torch.cuda.memory_allocated()
@@ -1082,7 +1092,7 @@ def test_pconv_linear_opt_random(point_sizes=[50000, 100000, 200000], K=64, num_
             # Forward
             torch.cuda.synchronize()
             start = time.time()
-            out_opt_fused = pconv_linear_opt(input_features, neighbor_inds, weights, additional_features)
+            out_opt_fused = pconv_linear_opt(input_features, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx, weights, additional_features)
             torch.cuda.synchronize()
             forward_time = time.time() - start
 
@@ -1224,13 +1234,13 @@ def plot_benchmark_results(results):
 
 
 if __name__ == "__main__":
-    test_pconv_linear()
-    test_pconv_linear_with_memory()
-    test_knn_inv()
-    test_pconv_linear_opt()
+    # test_pconv_linear()
+    # test_pconv_linear_with_memory()
+    # test_knn_inv()
+    # test_pconv_linear_opt()
 
     results = test_pconv_linear_opt_random(
-        point_sizes=[50000, 100000, 200000],
+        point_sizes=[25000, 50000, 100000, 200000],
         K=64,
         num_runs=3
     )
