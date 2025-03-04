@@ -131,6 +131,45 @@ def knn(pts1, pts2, k):
     return indices_i.long()
 
 
+def create_inverse_python(neighbor_mat, total_points):
+        """
+        Create inverse mapping for KNN
+
+        Args:
+            neighbor_mat: shape [num_points, K] containing neighbor indices
+            total_points: Total number of points in the point cloud (including potential points to add)
+        """
+
+        K = neighbor_mat.shape[1]
+        neigh = [[] for n in range(total_points)]
+        inv_k = [[] for n in range(total_points)]
+
+        # Neighbor lists
+        for r in range(neighbor_mat.shape[0]):
+            for c in range(K):
+                neigh[neighbor_mat[r,c]].append(r)
+                inv_k[neighbor_mat[r,c]].append(c)
+
+        # Get index array
+        idx = [len(x) for x in neigh]
+        cum_sum = 0
+        idx_array = []
+        for i in range(total_points):
+            if idx[i] == 0:
+                idx_array.append(cum_sum)
+            else:
+                idx_array.append(cum_sum)
+                cum_sum = idx[i] + cum_sum
+        idx_array.append(neighbor_mat.shape[0] * K)  # total size of inverse arrays
+
+        neighbors = np.hstack([np.array(x) for x in neigh if len(x) > 0]).flatten()
+        inv_k = np.hstack([np.array(x) for x in inv_k if len(x) > 0]).flatten()
+
+        return (torch.from_numpy(neighbors).cuda().long(), 
+                torch.from_numpy(inv_k).cuda().long(), 
+                torch.from_numpy(np.array(idx_array)).cuda().long())
+
+
 def test_pconv_linear():
     path = "/nfs/stak/users/sivakuml/hpc-memory/cutlass/data/500000pts"
     device = torch.device("cuda")
@@ -392,44 +431,6 @@ def test_pconv_linear_with_memory(num_runs=100):
 
 
 def test_knn_inv():
-    def create_inverse_python(neighbor_mat, total_points):
-        """
-        Create inverse mapping for KNN
-
-        Args:
-            neighbor_mat: shape [num_points, K] containing neighbor indices
-            total_points: Total number of points in the point cloud (including potential points to add)
-        """
-
-        K = neighbor_mat.shape[1]
-        neigh = [[] for n in range(total_points)]
-        inv_k = [[] for n in range(total_points)]
-
-        # Neighbor lists
-        for r in range(neighbor_mat.shape[0]):
-            for c in range(K):
-                neigh[neighbor_mat[r,c]].append(r)
-                inv_k[neighbor_mat[r,c]].append(c)
-
-        # Compute index array
-        idx = [len(x) for x in neigh]
-        cum_sum = 0
-        idx_array = []
-        for i in range(total_points):
-            if idx[i] == 0:
-                idx_array.append(cum_sum)
-            else:
-                idx_array.append(cum_sum)
-                cum_sum = idx[i] + cum_sum
-        idx_array.append(neighbor_mat.shape[0] * K)  # total size of inverse arrays
-
-        neighbors = np.hstack([np.array(x) for x in neigh if len(x) > 0]).flatten()
-        inv_k = np.hstack([np.array(x) for x in inv_k if len(x) > 0]).flatten()
-
-        return (torch.from_numpy(neighbors).cuda().long(), 
-                torch.from_numpy(inv_k).cuda().long(), 
-                torch.from_numpy(np.array(idx_array)).cuda().long())
-
     def compare_outputs_by_segments(cuda_neighbors, cuda_k, py_neighbors, py_k, inv_idx):
         """
         Compare outputs by sorting pairs within each segment defined by inv_idx
@@ -623,6 +624,123 @@ def test_knn_inv():
     print(f"\nNumber of segments with mismatches: {num_diff}")
     if num_diff == 0:
         print("All segments match after sorting :)")
+
+
+def benchmark_knn_inv(point_sizes, k_values, num_runs=3):
+    """
+    Benchmark the KNN inverse computation with various point sizes and K values
+    """
+    results = {
+        'point_sizes': point_sizes,
+        'k_values': k_values,
+        'cuda': {
+            'runtime': np.zeros((len(point_sizes), len(k_values))),
+            'memory': np.zeros((len(point_sizes), len(k_values)))
+        },
+        'python': {
+            'runtime': np.zeros((len(point_sizes), len(k_values))),
+            'memory': np.zeros((len(point_sizes), len(k_values)))
+        }
+    }
+
+    device = torch.device("cuda")
+    B = 1  # batch size
+
+    for i, n_points in enumerate(point_sizes):
+        print(f"\n===== Testing with {n_points} points =====")
+
+        for j, K in enumerate(k_values):
+            print(f"\n----- K = {K} -----")
+
+            torch.manual_seed(42)
+            input_points = torch.randn(B, n_points, 3, device=device, requires_grad=False)
+
+            print("Computing KNN indices...")
+            neighbor_inds = knn(input_points, input_points, K).contiguous()
+            total_points = n_points
+
+            print(f"Neighbor indices shape: {neighbor_inds.shape}")
+
+            print("Performing warmup runs...")
+            for _ in range(2):
+                _ = pcf_cuda.compute_knn_inverse(neighbor_inds, total_points)
+                torch.cuda.synchronize()
+
+                for b in range(B):
+                    _ = create_inverse_python(neighbor_inds[b].cpu().numpy(), total_points)
+                torch.cuda.synchronize()
+
+            cuda_times = []
+            cuda_memory = []
+            python_times = []
+            python_memory = []
+
+            print(f"Running {num_runs} iterations for each implementation...")
+
+            for r in range(num_runs):
+                torch.cuda.empty_cache()
+                gc.collect()
+                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.synchronize()
+                mem_before = torch.cuda.memory_allocated()
+                start_time = time.time()
+
+                cuda_outputs = pcf_cuda.compute_knn_inverse(neighbor_inds, total_points)
+
+                torch.cuda.synchronize()
+                end_time = time.time()
+
+                cuda_times.append(end_time - start_time)
+                cuda_memory.append(torch.cuda.max_memory_allocated() - mem_before)
+
+                del cuda_outputs
+                torch.cuda.empty_cache()
+
+                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.synchronize()
+                mem_before = torch.cuda.memory_allocated()
+                start_time = time.time()
+
+                python_outputs = [], [], []
+                for b in range(B):
+                    n_out, k_out, idx_out = create_inverse_python(neighbor_inds[b].cpu().numpy(), total_points)
+                    python_outputs[0].append(n_out)
+                    python_outputs[1].append(k_out)
+                    python_outputs[2].append(idx_out)
+
+                python_outputs = [torch.stack(x, dim=0) if x else None for x in python_outputs]
+
+                torch.cuda.synchronize()
+                end_time = time.time()
+
+                python_times.append(end_time - start_time)
+                python_memory.append(torch.cuda.max_memory_allocated() - mem_before)
+
+                del python_outputs
+                torch.cuda.empty_cache()
+
+            cuda_times_ms = np.array(cuda_times) * 1000
+            python_times_ms = np.array(python_times) * 1000
+            cuda_memory_mb = np.array(cuda_memory) / (1024 * 1024)
+            python_memory_mb = np.array(python_memory) / (1024 * 1024)
+
+            results['cuda']['runtime'][i, j] = np.mean(cuda_times_ms)
+            results['cuda']['memory'][i, j] = np.mean(cuda_memory_mb)
+            results['python']['runtime'][i, j] = np.mean(python_times_ms)
+            results['python']['memory'][i, j] = np.mean(python_memory_mb)
+
+            print(f"\nCUDA Implementation:")
+            print(f"Runtime (ms): {np.mean(cuda_times_ms):.2f} ± {np.std(cuda_times_ms):.2f}")
+            print(f"Memory (MB): {np.mean(cuda_memory_mb):.2f} ± {np.std(cuda_memory_mb):.2f}")
+
+            print(f"\nPython Implementation:")
+            print(f"Runtime (ms): {np.mean(python_times_ms):.2f} ± {np.std(python_times_ms):.2f}")
+            print(f"Memory (MB): {np.mean(python_memory_mb):.2f} ± {np.std(python_memory_mb):.2f}")
+
+            print(f"\nSpeedup: {np.mean(python_times_ms)/np.mean(cuda_times_ms):.2f}x")
+            print(f"Memory Reduction: {np.mean(python_memory_mb)/np.mean(cuda_memory_mb):.2f}x")
+
+    return results
 
 
 def test_pconv_linear_opt():
@@ -1133,13 +1251,99 @@ def test_pconv_linear_opt_random(point_sizes=[50000, 100000, 200000], K=64, num_
     return results
 
 
-def plot_benchmark_results(results):
-    """
-    Plot benchmark results
+def plot_knn_inv_benchmark(results):
+    point_sizes = results['point_sizes']
+    k_values = results['k_values']
 
-    Args:
-        results: Dict of results from test_pconv_linear_opt_random
-    """
+    plt.figure(figsize=(20, 12))
+
+    plt.subplot(2, 2, 1)
+    for j, K in enumerate(k_values):
+        cuda_runtimes = results['cuda']['runtime'][:, j]
+        python_runtimes = results['python']['runtime'][:, j]
+
+        plt.plot(point_sizes, cuda_runtimes, 'o-', label=f'CUDA (K={K})')
+        plt.plot(point_sizes, python_runtimes, 's--', label=f'Python (K={K})')
+
+    plt.title('Runtime Comparison')
+    plt.xlabel('Number of Points')
+    plt.ylabel('Time (ms)')
+    plt.grid(True)
+    plt.legend()
+    plt.xscale('log')
+    plt.yscale('log')
+
+    plt.subplot(2, 2, 2)
+    for j, K in enumerate(k_values):
+        cuda_memory = results['cuda']['memory'][:, j]
+        python_memory = results['python']['memory'][:, j]
+
+        plt.plot(point_sizes, cuda_memory, 'o-', label=f'CUDA (K={K})')
+        plt.plot(point_sizes, python_memory, 's--', label=f'Python (K={K})')
+
+    plt.title('Memory Usage Comparison')
+    plt.xlabel('Number of Points')
+    plt.ylabel('Memory (MB)')
+    plt.grid(True)
+    plt.legend()
+    plt.xscale('log')
+    plt.yscale('log')
+
+    plt.subplot(2, 2, 3)
+    for j, K in enumerate(k_values):
+        speedup = results['python']['runtime'][:, j] / results['cuda']['runtime'][:, j]
+        plt.plot(point_sizes, speedup, 'o-', label=f'K={K}')
+
+    plt.title('CUDA Speedup over Python Implementation')
+    plt.xlabel('Number of Points')
+    plt.ylabel('Speedup Factor (higher is better)')
+    plt.grid(True)
+    plt.legend()
+    plt.xscale('log')
+
+    plt.subplot(2, 2, 4)
+    for j, K in enumerate(k_values):
+        mem_reduction = results['python']['memory'][:, j] / results['cuda']['memory'][:, j]
+        plt.plot(point_sizes, mem_reduction, 'o-', label=f'K={K}')
+
+    plt.title('CUDA Memory Reduction over Python Implementation')
+    plt.xlabel('Number of Points')
+    plt.ylabel('Memory Reduction Factor (higher is better)')
+    plt.grid(True)
+    plt.legend()
+    plt.xscale('log')
+
+    plt.tight_layout()
+    plt.savefig('knn_inv_benchmark_results.png', dpi=300)
+    plt.show()
+
+    plt.figure(figsize=(16, 6))
+
+    plt.subplot(1, 2, 1)
+    largest_idx = len(point_sizes) - 1
+    plt.plot(k_values, results['cuda']['runtime'][largest_idx, :], 'o-', label='CUDA')
+    plt.plot(k_values, results['python']['runtime'][largest_idx, :], 's--', label='Python')
+    plt.title(f'Runtime vs K (Points = {point_sizes[largest_idx]})')
+    plt.xlabel('K Value')
+    plt.ylabel('Time (ms)')
+    plt.grid(True)
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(k_values, results['cuda']['memory'][largest_idx, :], 'o-', label='CUDA')
+    plt.plot(k_values, results['python']['memory'][largest_idx, :], 's--', label='Python')
+    plt.title(f'Memory Usage vs K (Points = {point_sizes[largest_idx]})')
+    plt.xlabel('K Value')
+    plt.ylabel('Memory (MB)')
+    plt.grid(True)
+    plt.legend()
+
+    plt.tight_layout()
+    plt.savefig('knn_inv_k_scaling.png', dpi=300)
+    plt.show()
+
+
+def plot_pconv_linear_opt_benchmark(results):
     point_sizes = results['point_sizes']
 
     plt.figure(figsize=(20, 12))
@@ -1147,8 +1351,8 @@ def plot_benchmark_results(results):
     # forward times
     plt.subplot(2, 2, 1)
     plt.plot(point_sizes, results['unfused']['forward'], 'o-', label='Unfused')
-    plt.plot(point_sizes, results['fused']['forward'], 's-', label='Fused')
-    plt.plot(point_sizes, results['opt_fused']['forward'], '^-', label='Optimized Fused')
+    plt.plot(point_sizes, results['fused']['forward'], 's-', label='PConv + Linear Fused')
+    plt.plot(point_sizes, results['opt_fused']['forward'], '^-', label='PConv + Linear Fused using kNN Inv')
     plt.title('Forward Time')
     plt.xlabel('Number of Points')
     plt.ylabel('Time (ms)')
@@ -1158,8 +1362,8 @@ def plot_benchmark_results(results):
     # backward times
     plt.subplot(2, 2, 2)
     plt.plot(point_sizes, results['unfused']['backward'], 'o-', label='Unfused')
-    plt.plot(point_sizes, results['fused']['backward'], 's-', label='Fused')
-    plt.plot(point_sizes, results['opt_fused']['backward'], '^-', label='Optimized Fused')
+    plt.plot(point_sizes, results['fused']['backward'], 's-', label='PConv + Linear Fused')
+    plt.plot(point_sizes, results['opt_fused']['backward'], '^-', label='PConv + Linear Fused using kNN Inv')
     plt.title('Backward Time')
     plt.xlabel('Number of Points')
     plt.ylabel('Time (ms)')
@@ -1169,8 +1373,8 @@ def plot_benchmark_results(results):
     # total times
     plt.subplot(2, 2, 3)
     plt.plot(point_sizes, results['unfused']['total'], 'o-', label='Unfused')
-    plt.plot(point_sizes, results['fused']['total'], 's-', label='Fused')
-    plt.plot(point_sizes, results['opt_fused']['total'], '^-', label='Optimized Fused')
+    plt.plot(point_sizes, results['fused']['total'], 's-', label='PConv + Linear Fused')
+    plt.plot(point_sizes, results['opt_fused']['total'], '^-', label='PConv + Linear Fused using kNN Inv')
     plt.title('Total Time (Forward + Backward)')
     plt.xlabel('Number of Points')
     plt.ylabel('Time (ms)')
@@ -1180,8 +1384,8 @@ def plot_benchmark_results(results):
     # memory usage
     plt.subplot(2, 2, 4)
     plt.plot(point_sizes, results['unfused']['memory'], 'o-', label='Unfused')
-    plt.plot(point_sizes, results['fused']['memory'], 's-', label='Fused')
-    plt.plot(point_sizes, results['opt_fused']['memory'], '^-', label='Optimized Fused')
+    plt.plot(point_sizes, results['fused']['memory'], 's-', label='PConv + Linear Fused')
+    plt.plot(point_sizes, results['opt_fused']['memory'], '^-', label='PConv + Linear Fused using kNN Inv')
     plt.title('Memory Usage')
     plt.xlabel('Number of Points')
     plt.ylabel('Memory (MB)')
@@ -1198,13 +1402,13 @@ def plot_benchmark_results(results):
     plt.subplot(1, 2, 1)
     plt.plot(point_sizes, 
              [u/f for u, f in zip(results['unfused']['total'], results['fused']['total'])], 
-             's-', label='Fused vs Unfused')
+             's-', label='PConv + Linear Fused vs. Unfused')
     plt.plot(point_sizes, 
              [u/o for u, o in zip(results['unfused']['total'], results['opt_fused']['total'])], 
-             '^-', label='Optimized Fused vs Unfused')
+             '^-', label='PConv + Linear Fused using kNN Inv vs. Unfused')
     plt.plot(point_sizes, 
              [f/o for f, o in zip(results['fused']['total'], results['opt_fused']['total'])], 
-             'D-', label='Optimized Fused vs Fused')
+             'D-', label='PConv + Linear Fused using kNN Inv vs. PConv + Linear Fused')
     plt.title('Speedup Factor')
     plt.xlabel('Number of Points')
     plt.ylabel('Speedup (higher is better)')
@@ -1215,13 +1419,13 @@ def plot_benchmark_results(results):
     plt.subplot(1, 2, 2)
     plt.plot(point_sizes, 
              [u/f for u, f in zip(results['unfused']['memory'], results['fused']['memory'])], 
-             's-', label='Fused vs Unfused')
+             's-', label='PConv + Linear Fused vs. Unfused')
     plt.plot(point_sizes, 
              [u/o for u, o in zip(results['unfused']['memory'], results['opt_fused']['memory'])], 
-             '^-', label='Optimized Fused vs Unfused')
+             '^-', label='PConv + Linear Fused using kNN Inv vs. Unfused')
     plt.plot(point_sizes, 
              [f/o for f, o in zip(results['fused']['memory'], results['opt_fused']['memory'])], 
-             'D-', label='Optimized Fused vs Fused')
+             'D-', label='PConv + Linear Fused using kNN Inv vs. PConv + Linear Fused')
     plt.title('Memory Reduction Factor')
     plt.xlabel('Number of Points')
     plt.ylabel('Memory Reduction (higher is better)')
@@ -1236,12 +1440,19 @@ def plot_benchmark_results(results):
 if __name__ == "__main__":
     # test_pconv_linear()
     # test_pconv_linear_with_memory()
-    # test_knn_inv()
-    # test_pconv_linear_opt()
 
-    results = test_pconv_linear_opt_random(
-        point_sizes=[25000, 50000, 100000, 200000],
-        K=64,
-        num_runs=3
+    # test_knn_inv()
+    results = benchmark_knn_inv(
+                    point_sizes=[25000, 50000, 100000, 200000],
+                    k_values=[16, 32, 64, 128],
+                    num_runs=3
     )
-    plot_benchmark_results(results)
+    plot_knn_inv_benchmark(results)
+
+    # test_pconv_linear_opt()
+    # results = test_pconv_linear_opt_random(
+    #                 point_sizes=[25000, 50000, 100000, 200000],
+    #                 K=64,
+    #                 num_runs=3
+    # )
+    # plot_pconv_linear_opt_benchmark(results)
