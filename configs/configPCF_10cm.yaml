@@ -1,8 +1,10 @@
 # See get_default_configs() in train_ScanNet_DDP_Warmup.py
 # and get_default_configs() in model_architecture.py for the meanings of those configs
+USE_CUDA_KERNEL: True
+PCONV_OPT:      False
 BATCH_NORM:     True
 BATCH_SIZE:     16
-NUM_WORKERS:    24
+NUM_WORKERS:    2
 USE_XYZ:        True
 USE_MLP:        False
 USE_WEIGHT:     True
@@ -38,9 +40,9 @@ num_heads:      8
 resblocks:      [ 0, 2, 4, 6, 6]
 resblocks_back: [ 0, 0, 0, 0, 0]
 
-train_data_path: './data/ScanNet_withNewNormal/train/*.pth'
-val_data_path:   './data/ScanNet_withNewNormal/val/*.pth'
-test_data_path:  './data/ScanNet_withNewNormal/test/*.pth'
+train_data_path: '/nfs/hpc/share/lif-grp/Datasets/ScanNet/V2/ScanNet_withNormal/train/*.pth'
+val_data_path:   '/nfs/hpc/share/lif-grp/Datasets/ScanNet/V2/ScanNet_withNormal/val/*.pth'
+test_data_path:  '/nfs/hpc/share/lif-grp/Datasets/ScanNet/V2/ScanNet_withNormal/test/*.pth'
 pretrain:        null
 optimizer:       'AdamW'
 adamw_decay:     0.05
@@ -62,7 +64,7 @@ warmup:           'linear'
 warmup_epochs:    10
 warmup_ratio:     0.00001
 
-use_tensorboard: False
+use_tensorboard: True
 model_name:      'NewPointConvFormer_10cm'
 experiment_dir:  './guided_experiment_10cm/'
 ft_experiment_dir: './ft_guided_experiment_10cm/'

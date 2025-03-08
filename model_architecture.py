@@ -172,7 +172,9 @@ class PCF_Backbone(nn.Module):
                                     out_ch, out_ch, cfg.num_heads))
                 self.pointconv_res.append(res_blocks)
 
-    def forward(self, features, pointclouds, edges_self, edges_forward, norms):
+    def forward(self, features, pointclouds, edges_self, edges_forward, norms,
+                inv_neighbors_self=None, inv_k_self=None, inv_idx_self=None,
+                inv_neighbors_forward=None, inv_k_forward=None, inv_idx_forward=None):
         # encode pointwise info
         pointwise_feat = torch.cat(
             [features, pointclouds[0]], -1) if self.cfg.USE_XYZ else features
@@ -180,12 +182,20 @@ class PCF_Backbone(nn.Module):
         # level 1 conv, this helps performance significantly on 5cm/10cm inputs
         # but have relatively small use on 2cm
         if self.cfg.use_level_1:
+            inv_self_args = {}
+            if self.cfg.PCONV_OPT:
+                inv_self_args = {
+                                    "inv_neighbors": inv_neighbors_self[0],
+                                    "inv_k": inv_k_self[0],
+                                    "inv_idx": inv_idx_self[0]
+                                }
+
             pointwise_feat, vi_features = self.selfpointconv(
-                pointclouds[0], pointwise_feat, edges_self[0], norms[0])
+                pointclouds[0], pointwise_feat, edges_self[0], norms[0], **inv_self_args)
             pointwise_feat, _ = self.selfpointconv_res1(
-                pointclouds[0], pointwise_feat, edges_self[0], norms[0], vi_features=vi_features)
+                pointclouds[0], pointwise_feat, edges_self[0], norms[0], vi_features=vi_features, **inv_self_args)
             pointwise_feat, _ = self.selfpointconv_res2(
-                pointclouds[0], pointwise_feat, edges_self[0], norms[0], vi_features=vi_features)
+                pointclouds[0], pointwise_feat, edges_self[0], norms[0], vi_features=vi_features, **inv_self_args)
         else:
             # if don't use level 1 convs, then just simply do a linear layer to
             # increase the feature dimensionality
@@ -193,12 +203,20 @@ class PCF_Backbone(nn.Module):
 
         feat_list = [pointwise_feat]
         for i, pointconv in enumerate(self.pointconv):
+            inv_fwd_args = {}
+            if self.cfg.PCONV_OPT:
+                inv_fwd_args = {
+                                    "inv_neighbors": inv_neighbors_forward[i],
+                                    "inv_k": inv_k_forward[i],
+                                    "inv_idx": inv_idx_forward[i]
+                                }
+
             if self.cfg.transformer_type != 'PCF':
                 sparse_feat = pointconv(
                     pointclouds[i], feat_list[-1], edges_forward[i], pointclouds[i + 1])
             else:
                 sparse_feat, _ = pointconv(
-                    pointclouds[i], feat_list[-1], edges_forward[i], norms[i], pointclouds[i + 1], norms[i + 1])
+                    pointclouds[i], feat_list[-1], edges_forward[i], norms[i], pointclouds[i + 1], norms[i + 1], **inv_fwd_args)
             # print(sparse_feat.shape)
             # There is the need to recompute VI features from the neighbors at this level rather than from the previous level, hence need
             # to recompute VI features in the first residual block
@@ -208,12 +226,19 @@ class PCF_Backbone(nn.Module):
                     sparse_feat = res_block(
                         pointclouds[i + 1], sparse_feat, edges_self[i + 1])
                 else:
+                    inv_self_args = {}
+                    if self.cfg.PCONV_OPT:
+                        inv_self_args = {
+                                            "inv_neighbors": inv_neighbors_self[i + 1],
+                                            "inv_k": inv_k_self[i + 1],
+                                            "inv_idx": inv_idx_self[i + 1]
+                                        }
                     if vi_features is not None:
                         sparse_feat, _ = res_block(
-                            pointclouds[i + 1], sparse_feat, edges_self[i + 1], norms[i + 1], vi_features=vi_features)
+                            pointclouds[i + 1], sparse_feat, edges_self[i + 1], norms[i + 1], vi_features=vi_features, **inv_self_args)
                     else:
                         sparse_feat, vi_features = res_block(
-                            pointclouds[i + 1], sparse_feat, edges_self[i + 1], norms[i + 1])
+                            pointclouds[i + 1], sparse_feat, edges_self[i + 1], norms[i + 1], **inv_self_args)
 
             feat_list.append(sparse_feat)
 
@@ -385,30 +410,90 @@ class PointConvFormer_Segmentation(nn.Module):
             edges_self,
             edges_forward,
             edges_propagate,
-            norms):
-        feat_list = self.pcf_backbone(
-            features,
-            pointclouds,
-            edges_self,
-            edges_forward,
-            norms)
+            norms,
+            inv_self=None,
+            inv_forward=None,
+            inv_propagate=None):
+
+        inv_neighbors_self, inv_k_self, inv_idx_self = (None, None, None)
+        inv_neighbors_forward, inv_k_forward, inv_idx_forward = (None, None, None) 
+        inv_neighbors_propagate, inv_k_propagate, inv_idx_propagate = (None, None, None)
+
+        if self.cfg.PCONV_OPT:
+            inv_neighbors_self, inv_k_self, inv_idx_self = inv_self
+            inv_neighbors_forward, inv_k_forward, inv_idx_forward = inv_forward
+            inv_neighbors_propagate, inv_k_propagate, inv_idx_propagate = inv_propagate
+
+        backbone_args = {
+                            "features": features,
+                            "pointclouds": pointclouds,
+                            "edges_self": edges_self,
+                            "edges_forward": edges_forward,
+                            "norms": norms
+                        }
+
+        if self.cfg.PCONV_OPT:
+            backbone_args.update({
+                                    "inv_neighbors_self": inv_neighbors_self,
+                                    "inv_k_self": inv_k_self,
+                                    "inv_idx_self": inv_idx_self,
+                                    "inv_neighbors_forward": inv_neighbors_forward,
+                                    "inv_k_forward": inv_k_forward,
+                                    "inv_idx_forward": inv_idx_forward
+                                })
+
+        feat_list = self.pcf_backbone(**backbone_args)
 
         sparse_feat = feat_list[-1]
         for i, pointdeconv in enumerate(self.pointdeconv):
             cur_level = self.total_level - 2 - i
 
-            sparse_feat, _ = pointdeconv(pointclouds[cur_level +
-                                                     1], sparse_feat, edges_propagate[cur_level], norms[cur_level +
-                                                                                                        1], pointclouds[cur_level], norms[cur_level], feat_list[cur_level])
+            inv_args = {}
+            if self.cfg.PCONV_OPT:
+                inv_args = {
+                                "inv_neighbors": inv_neighbors_propagate[cur_level],
+                                "inv_k": inv_k_propagate[cur_level],
+                                "inv_idx": inv_idx_propagate[cur_level]
+                            }
+
+            sparse_feat, _ = pointdeconv(
+                                            pointclouds[cur_level + 1],
+                                            sparse_feat,
+                                            edges_propagate[cur_level],
+                                            norms[cur_level + 1],
+                                            pointclouds[cur_level],
+                                            norms[cur_level],
+                                            feat_list[cur_level],
+                                            **inv_args
+                                        )
 
             vi_features = None
             for res_block in self.pointdeconv_res[i]:
+                res_args = {}
+                if self.cfg.PCONV_OPT:
+                    res_args = {
+                                    "inv_neighbors": inv_neighbors_self[cur_level],
+                                    "inv_k": inv_k_self[cur_level],
+                                    "inv_idx": inv_idx_self[cur_level]
+                                }
+
                 if vi_features is not None:
                     sparse_feat, _ = res_block(
-                        pointclouds[cur_level], sparse_feat, edges_self[cur_level], norms[cur_level], vi_features=vi_features)
+                                                    pointclouds[cur_level],
+                                                    sparse_feat,
+                                                    edges_self[cur_level],
+                                                    norms[cur_level],
+                                                    vi_features=vi_features,
+                                                    **res_args
+                                                )
                 else:
                     sparse_feat, vi_features = res_block(
-                        pointclouds[cur_level], sparse_feat, edges_self[cur_level], norms[cur_level])
+                                                            pointclouds[cur_level],
+                                                            sparse_feat,
+                                                            edges_self[cur_level],
+                                                            norms[cur_level],
+                                                            **res_args
+                                                        )
 
             feat_list[cur_level] = sparse_feat
 
