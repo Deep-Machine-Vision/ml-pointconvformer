@@ -605,6 +605,9 @@ def validate(val_loader, model, criterion):
                     loss_meter=loss_meter,
                     accuracy=accuracy))
 
+        del inv_self, inv_forward, inv_propagate
+        del pred, loss, output, intersection, union, target
+
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
     # print('iou_class : ', iou_class)
     accuracy_class = intersection_meter.sum / (target_meter.sum + 1e-10)

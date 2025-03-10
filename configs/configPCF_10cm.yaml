@@ -1,9 +1,9 @@
 # See get_default_configs() in train_ScanNet_DDP_Warmup.py
 # and get_default_configs() in model_architecture.py for the meanings of those configs
 USE_CUDA_KERNEL: True
-PCONV_OPT:      False
+PCONV_OPT:      True
 BATCH_NORM:     True
-BATCH_SIZE:     16
+BATCH_SIZE:     32
 NUM_WORKERS:    2
 USE_XYZ:        True
 USE_MLP:        False
