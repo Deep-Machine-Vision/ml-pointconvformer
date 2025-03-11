@@ -12,7 +12,7 @@ from torch.utils.data import Dataset
 import transforms as t
 from util.voxelize import voxelize
 
-from datasetCommon import subsample_and_knn, compute_weight, collect_fn
+from datasetCommon import subsample_and_knn, compute_weight, collect_fn, subsample
 
 
 class ScanNetDataset(Dataset):
@@ -218,17 +218,28 @@ class ScanNetDataset(Dataset):
             for crop_idx in uniq_idx:
                 data = {}
                 coord_part, norm_part = coord[crop_idx], norm[crop_idx]
-                point_list, nei_forward_list, nei_propagate_list, nei_self_list, norm_list \
-                    = subsample_and_knn(coord_part, norm_part, grid_size=self.cfg.grid_size, K_self=self.cfg.K_self,
-                                        K_forward=self.cfg.K_forward, K_propagate=self.cfg.K_propagate)
-                data['point_list'] = point_list
-                data['nei_forward_list'] = nei_forward_list
-                data['nei_propagate_list'] = nei_propagate_list
-                data['nei_self_list'] = nei_self_list
-                data['surface_normal_list'] = norm_list
-                data['feature_list'] = [color[crop_idx].astype(np.float32)]
-                data['label_list'] = [label[crop_idx].astype(np.int32)]
-                data['crop_idx'] = crop_idx
+
+                if self.cfg.post_knn:
+                    point_list, norm_list = subsample(coord_part, norm_part, grid_size=self.cfg.grid_size)
+    
+                    data['point_list'] = point_list
+                    data['surface_normal_list'] = norm_list
+                    data['feature_list'] = [color[crop_idx].astype(np.float32)]
+                    data['label_list'] = [label[crop_idx].astype(np.int32)]
+                    data['crop_idx'] = crop_idx
+
+                else:     
+                    point_list, nei_forward_list, nei_propagate_list, nei_self_list, norm_list \
+                        = subsample_and_knn(coord_part, norm_part, grid_size=self.cfg.grid_size, K_self=self.cfg.K_self,
+                                            K_forward=self.cfg.K_forward, K_propagate=self.cfg.K_propagate)
+                    data['point_list'] = point_list
+                    data['nei_forward_list'] = nei_forward_list
+                    data['nei_propagate_list'] = nei_propagate_list
+                    data['nei_self_list'] = nei_self_list
+                    data['surface_normal_list'] = norm_list
+                    data['feature_list'] = [color[crop_idx].astype(np.float32)]
+                    data['label_list'] = [label[crop_idx].astype(np.int32)]
+                    data['crop_idx'] = crop_idx
                 all_data.append(data)
             return all_data
 
@@ -245,19 +256,31 @@ class ScanNetDataset(Dataset):
 
 
         # print("number of points: ", coord.shape[0])
+        if self.cfg.post_knn:
+            point_list, norm_list = subsample(coord, norm, grid_size=self.cfg.grid_size)
+            all_data['point_list'] = point_list
+            all_data['surface_normal_list'] = norm_list
+            all_data['feature_list'] = [color.astype(np.float32)]
+            all_data['label_list'] = [label.astype(np.int32)]
 
-        point_list, nei_forward_list, nei_propagate_list, nei_self_list, norm_list = \
-            subsample_and_knn(coord, norm, grid_size=self.cfg.grid_size, K_self=self.cfg.K_self,
-                              K_forward=self.cfg.K_forward, K_propagate=self.cfg.K_propagate)
-        all_data['point_list'] = point_list
-        all_data['nei_forward_list'] = nei_forward_list
-        all_data['nei_propagate_list'] = nei_propagate_list
-        all_data['nei_self_list'] = nei_self_list
-        all_data['surface_normal_list'] = norm_list
-        all_data['feature_list'] = [color.astype(np.float32)]
-        all_data['label_list'] = [label.astype(np.int32)]
+        else:
+            point_list, nei_forward_list, nei_propagate_list, nei_self_list, norm_list = \
+                subsample_and_knn(coord, norm, grid_size=self.cfg.grid_size, K_self=self.cfg.K_self,
+                                K_forward=self.cfg.K_forward, K_propagate=self.cfg.K_propagate)
+            all_data['point_list'] = point_list
+            all_data['nei_forward_list'] = nei_forward_list
+            all_data['nei_propagate_list'] = nei_propagate_list
+            all_data['nei_self_list'] = nei_self_list
+            all_data['surface_normal_list'] = norm_list
+            all_data['feature_list'] = [color.astype(np.float32)]
+            all_data['label_list'] = [label.astype(np.int32)]
 
         return all_data
+
+def create_collect_fn(post_knn):
+    def wrapped_collect_fn(data_list):
+        return collect_fn(data_list, post_knn=post_knn)
+    return wrapped_collect_fn
 
 
 def getdataLoadersDDP(cfg):
@@ -305,7 +328,7 @@ def getdataLoaders(cfg, sampler):
 
     train_data_loader = torch.utils.data.DataLoader(training_dataset,
                                                     batch_size=cfg.BATCH_SIZE, 
-                                                    collate_fn=collect_fn, 
+                                                    collate_fn=create_collect_fn(cfg.post_knn), 
                                                     num_workers=cfg.NUM_WORKERS, 
                                                     pin_memory=True,
                                                     sampler=training_sampler,
@@ -313,7 +336,7 @@ def getdataLoaders(cfg, sampler):
 
     val_data_loader = torch.utils.data.DataLoader(validation_dataset,
                                                   batch_size=cfg.BATCH_SIZE, 
-                                                  collate_fn=collect_fn, 
+                                                  collate_fn=create_collect_fn(cfg.post_knn), 
                                                   num_workers=cfg.NUM_WORKERS, 
                                                   sampler=validation_sampler,
                                                   pin_memory=True)
