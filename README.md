@@ -62,6 +62,8 @@ setup.sh
 
 7. To enable GPU-based KNN computation, set `post_knn: true` in the configuration file. Refer to [`train_ScanNet_DDP_WarmUP.py`](./train_ScanNet_DDP_WarmP.py) for an example implementation, Load data (`features`, `pointclouds`, `target`, `norms`, `points_stored`), Compute kNN edges using `compute_knn_packed()`, Prepare edges for further processing using `prepare()`
 
+8. To enable optimized PointConv CUDA kernels for saving peak GPU memory usage, set `USE_CUDA_KERNEL: True` and `PCONV_OPT: True` in the configuration file. Refer to ['configPCF_Opt_10cm.yaml'](./configs/configPCF_Opt_10cm.yaml). Use the fused PointConv and Linear layer forward and backward kernels, Compute kNN Inverse mapping indices for all the edges, use the inverse indices in the backward kernel to compute gradients.
+
 ### Evaluation
 
 <!-- (Obselete Please download the pretrain weights of the models at [here](https://drive.google.com/file/d/1BShjM0PydlEX-bE7k3-fg2UBORpwUeWR/view?usp=sharing)) -->
