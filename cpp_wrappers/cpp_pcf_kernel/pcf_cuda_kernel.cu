@@ -874,6 +874,18 @@ torch::Tensor pconv_cuda_forward(
         return output;
 }
 
+
+// This function does a fused Point Convolution (PConv) followed by a Linear layer.
+//
+// 1. PConv Operation:
+//    - For each output point, gather input features from K neighbors using indices from neighbor_inds
+//    - Concatenate these gathered features with additional per-point features (additional_features)
+//    - Apply learned weights to compute intermediate features (C_mid channels)
+//
+// 2. Linear Layer:
+//    - Take the PConv output (C_mid*(C_in+C_add) channels)
+//    - Apply linear transformation to get final output (C_out channels)
+//
 std::vector<torch::Tensor> pconv_linear_cuda_forward(
     torch::Tensor input,
     torch::Tensor neighbor_inds,
@@ -1007,6 +1019,22 @@ std::vector<torch::Tensor> pconv_linear_cuda_backward(
 }
 
 
+// This function computes inverse neighborhood relationships for KNN indices:
+// inv_neighbors: List of points that reference each target point (B x total_references)
+// inv_k: Corresponding k-index in original neighbor_inds tensor (B x total_references)
+// inv_idx: Prefix sum indicating start/end positions in inv_neighbors per point (B x (total_points+1))
+//
+// 1. count_neighbors_kernel:
+// - Build histogram of how many times each point is referenced as a neighbor
+// - Process points in segments of points_this_grid to handle large point clouds
+//
+// 2. compute_inv_idx_kernel:
+// - Convert counts to prefix sum for indexing into inv_neighbors
+//
+// 3. fill_inverse_kernel:
+// - Populate inverse mappings using precomputed indices
+// - Reuse segmented processing from count_neighbors_kernel
+//
 std::vector<torch::Tensor> knn_inverse_cuda_forward(
         torch::Tensor neighbor_inds,
         const int total_points
@@ -1073,6 +1101,23 @@ std::vector<torch::Tensor> knn_inverse_cuda_forward(
         return {inv_neighbors, inv_k, inv_idx};
 }
 
+
+// This function computes gradients for a fused Point Convolution (PConv) + Linear layer
+// using two optimized CUDA kernels: pconv_linear_fused_cuda_backward_kernel_opt (for output points) and
+// input_only_backward_kernel (for input-only points).
+//
+// 1. pconv_linear_fused_cuda_backward_kernel_opt:
+//    - Cache intermediate gradients to reduce global memory accesses
+//    - Gradient Computation:
+//      - Compute PConv weight and additional feature gradients using neighbor indices
+//      - Aggregate input gradients with atomic operations
+//      - Compute linear layer gradients in parallel across output channels
+//
+// 2. input_only_backward_kernel:
+//    - Handle input points referenced by neighbors but not processed in forward pass
+//    - Use precomputed indices to access referencing output points
+//    - We use dedicated kernel for input-only points to prevent branch divergence
+//
 std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
         torch::Tensor grad_output,
         torch::Tensor input,

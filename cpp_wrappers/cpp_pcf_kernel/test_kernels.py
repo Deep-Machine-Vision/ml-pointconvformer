@@ -1438,10 +1438,10 @@ def plot_pconv_linear_opt_benchmark(results):
 
 
 if __name__ == "__main__":
-    # test_pconv_linear()
-    # test_pconv_linear_with_memory()
+    test_pconv_linear()
+    test_pconv_linear_with_memory()
 
-    # test_knn_inv()
+    test_knn_inv()
     results = benchmark_knn_inv(
                     point_sizes=[25000, 50000, 100000, 200000],
                     k_values=[16, 32, 64, 128],
@@ -1449,10 +1449,10 @@ if __name__ == "__main__":
     )
     plot_knn_inv_benchmark(results)
 
-    # test_pconv_linear_opt()
-    # results = test_pconv_linear_opt_random(
-    #                 point_sizes=[25000, 50000, 100000, 200000],
-    #                 K=64,
-    #                 num_runs=3
-    # )
-    # plot_pconv_linear_opt_benchmark(results)
+    test_pconv_linear_opt()
+    results = test_pconv_linear_opt_random(
+                    point_sizes=[25000, 50000, 100000, 200000],
+                    K=64,
+                    num_runs=3
+    )
+    plot_pconv_linear_opt_benchmark(results)
