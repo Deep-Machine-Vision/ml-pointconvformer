@@ -12,10 +12,6 @@
 
 using namespace nvcuda;
 
-#define WARP_SIZE 32
-#define BLOCK_SIZE 256
-#define SEGMENT_SIZE 1024
-
 __host__ __device__ inline int nextPowerOf2(int n) {
     n--;           // Decrement n to handle the case when n is already a power of 2
     n |= n >> 1;   // Set all bits after the highest set bit to 1
@@ -24,18 +20,6 @@ __host__ __device__ inline int nextPowerOf2(int n) {
     n |= n >> 8;
     n |= n >> 16;
     return n + 1;  // Add 1 to get the next power of 2
-}
-
-// Helper function to convert float to half
-__global__ void convert_to_half(
-    const float* input,
-    half* output,
-    int size
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        output[idx] = __float2half(input[idx]);
-    }
 }
     
 
@@ -337,11 +321,11 @@ __global__ void pconv_linear_cuda_forward_kernel(
                 scalar_t sum = 0;
                 #pragma unroll
                 for (int k = 0; k < K; k++) {
-                if (in_idx < C_in) {
-                        sum += shared_input[k * C_in + in_idx] * shared_weights[k * C_mid + mid_idx];
-                } else {
-                        sum += shared_additional[k * C_add + (in_idx - C_in)] * shared_weights[k * C_mid + mid_idx];
-                }
+                        if (in_idx < C_in) {
+                                sum += shared_input[k * C_in + in_idx] * shared_weights[k * C_mid + mid_idx];
+                        } else {
+                                sum += shared_additional[k * C_add + (in_idx - C_in)] * shared_weights[k * C_mid + mid_idx];
+                        }
                 }
                 shared_intermediate[c] = sum;
                 pconv_output[batch_idx][point_idx][c] = sum;  // Store PConv output
@@ -354,7 +338,7 @@ __global__ void pconv_linear_cuda_forward_kernel(
                 scalar_t sum = 0;
                 #pragma unroll
                 for (int c = 0; c < total_channels; c++) {
-                sum += shared_intermediate[c] * linear_weights[tid][c];
+                        sum += shared_intermediate[c] * linear_weights[tid][c];
                 }
                 final_output[batch_idx][point_idx][tid] = sum + linear_bias[tid];
         }
@@ -535,7 +519,7 @@ __global__ void pconv_linear_cuda_backward_kernel(
         for (int c = tid; c < total_channels; c += blockDim.x) {
                 scalar_t sum = 0;
                 for (int c_out = 0; c_out < C_out; c_out++) {
-                sum += grad_output[batch_idx][point_idx][c_out] * linear_weights[c_out][c];
+                        sum += grad_output[batch_idx][point_idx][c_out] * linear_weights[c_out][c];
                 }
                 shared_grad[c] = sum;
         }
@@ -563,17 +547,17 @@ __global__ void pconv_linear_cuda_backward_kernel(
 
                 // Input features gradient
                 for (int c = 0; c < C_in; c++) {
-                const int grad_idx = c_mid * (C_in + C_add) + c;
-                const scalar_t grad_val = shared_grad[grad_idx];
-                atomicAdd(&grad_input[batch_idx][neighbor_inds[batch_idx][point_idx][k]][c],
-                        grad_val * weights[batch_idx][point_idx][k][c_mid]);
-                weight_grad += grad_val * input[batch_idx][neighbor_inds[batch_idx][point_idx][k]][c];
+                        const int grad_idx = c_mid * (C_in + C_add) + c;
+                        const scalar_t grad_val = shared_grad[grad_idx];
+                        atomicAdd(&grad_input[batch_idx][neighbor_inds[batch_idx][point_idx][k]][c],
+                                grad_val * weights[batch_idx][point_idx][k][c_mid]);
+                        weight_grad += grad_val * input[batch_idx][neighbor_inds[batch_idx][point_idx][k]][c];
                 }
 
                 // Additional features contribution to weight gradient
                 for (int c = 0; c < C_add; c++) {
-                const int grad_idx = c_mid * (C_in + C_add) + C_in + c;
-                weight_grad += shared_grad[grad_idx] * additional_features[batch_idx][point_idx][k][c];
+                        const int grad_idx = c_mid * (C_in + C_add) + C_in + c;
+                        weight_grad += shared_grad[grad_idx] * additional_features[batch_idx][point_idx][k][c];
                 }
 
                 grad_weights[batch_idx][point_idx][k][c_mid] = weight_grad;
@@ -582,13 +566,13 @@ __global__ void pconv_linear_cuda_backward_kernel(
         // Linear layer gradients
         if (tid < C_out) {
                 scalar_t bias_grad = grad_output[batch_idx][point_idx][tid];
-                
+
                 // Linear weights gradient
                 for (int c = 0; c < total_channels; c++) {
-                atomicAdd(&grad_linear_weights[tid][c],
-                        bias_grad * pconv_output[batch_idx][point_idx][c]);
+                        atomicAdd(&grad_linear_weights[tid][c],
+                                bias_grad * pconv_output[batch_idx][point_idx][c]);
                 }
-                
+
                 // Linear bias gradient
                 atomicAdd(&grad_linear_bias[tid], bias_grad);
         }
