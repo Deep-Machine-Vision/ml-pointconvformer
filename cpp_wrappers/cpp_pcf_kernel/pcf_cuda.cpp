@@ -6,6 +6,15 @@
 
 #include <vector>
 
+std::vector<torch::Tensor> pconv_linear_cutlass_forward(
+    torch::Tensor input,
+    torch::Tensor neighbor_inds,
+    torch::Tensor weights,
+    torch::Tensor additional_features,
+    torch::Tensor linear_weights,
+    torch::Tensor linear_bias);
+
+
 std::vector<torch::Tensor> knn_inverse_cuda_forward(
     torch::Tensor neighbor_inds,
     const int total_points);
@@ -209,6 +218,25 @@ std::vector<torch::Tensor> pconv_linear_opt_backward(
         linear_weights, pconv_output);
 }
 
+std::vector<torch::Tensor> pconv_linear_cutlass(
+    torch::Tensor input,
+    torch::Tensor neighbor_inds,
+    torch::Tensor weights,
+    torch::Tensor additional_features,
+    torch::Tensor linear_weights,
+    torch::Tensor linear_bias
+)
+{
+    CHECK_INPUT(input);
+    CHECK_INPUT(neighbor_inds);
+    CHECK_INPUT(weights);
+    CHECK_INPUT(additional_features);
+    CHECK_INPUT(linear_weights);
+    CHECK_INPUT(linear_bias);
+
+    return pconv_linear_cutlass_forward(input, neighbor_inds, weights, additional_features, linear_weights, linear_bias);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pcf_forward", &pcf_forward, "PCF forward (CUDA)");
   m.def("pcf_backward", &pcf_backward, "PCF backward (CUDA)");
@@ -218,4 +246,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pconv_linear_backward", &pconv_linear_backward, "Fused PointConv+Linear backward (CUDA)");
   m.def("pconv_linear_opt_backward", &pconv_linear_opt_backward, "Optimized Fused PointConv+Linear backward (CUDA)");
   m.def("compute_knn_inverse", &compute_knn_inverse, "Compute KNN inverse mapping (CUDA)");
+  m.def("pconv_linear_cutlass_forward", &pconv_linear_cutlass, "PConv Linear forward (CUTLASS)");
 }

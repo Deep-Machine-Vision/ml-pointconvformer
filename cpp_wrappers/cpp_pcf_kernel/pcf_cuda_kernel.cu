@@ -9,6 +9,13 @@
 #include <vector>
 #include <mma.h>
 #include <cuda_fp16.h>
+#include <cutlass/cutlass.h>
+#include <cutlass/layout/matrix.h>
+#include <cutlass/util/host_tensor.h>
+#include <cutlass/half.h>
+#include <cutlass/gemm/device/gemm_batched.h>
+#include <cutlass/gemm/device/gemm.h>
+#include <cutlass/epilogue/thread/linear_combination.h>
 
 using namespace nvcuda;
 
@@ -1179,4 +1186,196 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
         }
 
         return {grad_input, grad_weights, grad_additional, grad_linear_weights, grad_linear_bias};
+}
+
+
+// Gather input features based on neighbor indices
+__global__ void gather_input_features_kernel(
+        const float* input,
+        const int64_t* neighbor_inds,
+        float* gathered_input,
+        int B, int M, int Nout, int K, int C_in)
+{
+        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        const int total = B * Nout * K * C_in;
+        if (idx >= total) return;
+
+        const int b = idx / (Nout * K * C_in);
+        int rem = idx % (Nout * K * C_in);
+        const int n = rem / (K * C_in);
+        rem %= (K * C_in);
+        const int k = rem / C_in;
+        const int c = rem % C_in;
+
+        const int64_t neighbor_idx = neighbor_inds[b * Nout * K + n * K + k];
+        gathered_input[b * Nout * K * C_in + n * K * C_in + k * C_in + c] = 
+                                        input[b * M * C_in + neighbor_idx * C_in + c];
+}
+    
+std::vector<torch::Tensor> pconv_linear_cutlass_forward(
+        torch::Tensor input,
+        torch::Tensor neighbor_inds,
+        torch::Tensor weights,
+        torch::Tensor additional_features,
+        torch::Tensor linear_weights,
+        torch::Tensor linear_bias)
+{
+        const int B = input.size(0);
+        const int M = input.size(1);
+        const int Nout = neighbor_inds.size(1);
+        const int C_in = input.size(2);
+        const int K = neighbor_inds.size(2);
+        const int C_mid = weights.size(3);
+        const int C_add = additional_features.size(3);
+        const int C_out = linear_weights.size(0);
+
+        const int C_concat = C_in + C_add;
+
+        auto gathered_input = torch::zeros({B, Nout, K, C_in}, input.options());
+        {
+                const int threads = 256;
+                const int blocks = (B * Nout * K * C_in + threads - 1) / threads;
+                gather_input_features_kernel<<<blocks, threads>>>( 
+                                                                        input.data_ptr<float>(),
+                                                                        neighbor_inds.data_ptr<int64_t>(),
+                                                                        gathered_input.data_ptr<float>(),
+                                                                        B, M, Nout, K, C_in
+                                                                );
+        }
+
+        // [B, Nout, K, C_concat]
+        auto concatenated = torch::cat({gathered_input, additional_features}, -1).contiguous();
+
+        // Reshape for batched GEMM
+        // Compute: Y(j,i) = sum_{k} F(k,j)*W(k,i)
+        // where F (features) is of shape [K, C_concat]. So we need F^T
+        // features shape is transformed to [B*Nout, C_concat, K]
+        auto features = concatenated.view({B * Nout, K, C_concat}).permute({0, 2, 1}).contiguous();
+
+        // [B*Nout, K, C_mid]
+        auto weights_reshaped = weights.view({B * Nout, K, C_mid}).contiguous();
+
+        // GEMM compute Y = A * B with,
+        //    A = features, shape [C_concat x K]
+        //    B = weights_reshaped, shape [K x C_mid]
+        // So, we get the result, shape [C_concat x C_mid]
+        auto pconv_result = torch::zeros({B * Nout, C_concat, C_mid}, input.options());
+
+        // CUTLASS GEMM
+        using Layout = cutlass::layout::RowMajor;
+        using Gemm = cutlass::gemm::device::GemmBatched<
+                                                                float, Layout,          // A
+                                                                float, Layout,          // B
+                                                                float, Layout,          // C & D
+                                                                float,                  // Accumulator
+                                                                cutlass::arch::OpClassSimt,
+                                                                cutlass::arch::Sm70
+                                                        >;
+
+        Gemm gemm_op;
+        cutlass::Status status;
+
+        const int batch_count = B * Nout;
+
+        // Now, A (features) has dims -  M = C_concat, K = K
+        //      B (weights) has dims  -  K, N = C_mid
+        // Then, problem_size = (M, N, K) = (C_concat, C_mid, K)
+        const cutlass::gemm::GemmCoord problem_size(C_concat, C_mid, K);
+
+        cutlass::TensorRef<float const, Layout> A_ref(features.data_ptr<float>(), K);                   // with leading dim = K
+        cutlass::TensorRef<float const, Layout> B_ref(weights_reshaped.data_ptr<float>(), C_mid);       // with leading dim = C_mid
+        cutlass::TensorRef<float, Layout> C_ref(pconv_result.data_ptr<float>(), C_mid);                 // with leading dim = C_mid
+        cutlass::TensorRef<float, Layout> D_ref = C_ref;
+
+        const int64_t stride_A = C_concat * K;
+        const int64_t stride_B = K * C_mid;
+        const int64_t stride_C = C_concat * C_mid;
+        const int64_t stride_D = stride_C;
+
+        typename Gemm::EpilogueOutputOp::Params epilogue_op(1.0f, 0.0f);
+
+        typename Gemm::Arguments args(
+                                        problem_size,
+                                        A_ref, stride_A,
+                                        B_ref, stride_B,
+                                        C_ref, stride_C,
+                                        D_ref, stride_D,
+                                        epilogue_op,
+                                        batch_count
+                                );
+
+        const size_t workspace_size = Gemm::get_workspace_size(args);
+        auto workspace = torch::empty({static_cast<int64_t>(workspace_size)},
+                                        input.options().dtype(torch::kUInt8));
+
+        status = gemm_op.initialize(args, workspace.data_ptr());
+        if (status != cutlass::Status::kSuccess) {
+                throw std::runtime_error("CUTLASS GEMM initialization failed");
+        }
+
+        status = gemm_op();
+        if (status != cutlass::Status::kSuccess) {
+                throw std::runtime_error("CUTLASS GEMM execution failed");
+        }
+
+        // Now, pconv_result has shape [B*Nout, C_concat, C_mid]
+        // pconv_output in flattened row-major order
+        auto pconv_output = pconv_result.view({B, Nout, C_concat * C_mid});
+
+        // Linear layer: final_output = X * (W^T) + bias
+        // where X is the flattened PConv output, shape [B*Nout, (C_concat * C_mid)]
+        //       W^T is the transpose of linear_weights, shape [(C_concat * C_mid), C_out]
+        int K_linear = C_concat * C_mid;
+        auto X_mat = pconv_output.view({B * Nout, K_linear});
+        auto W_t = linear_weights.t().contiguous();     // [K_linear, C_out]
+
+        // Allocate output Y, [B*Nout, C_out].
+        auto Y = torch::zeros({B * Nout, C_out}, input.options());
+
+        // CUTLASS GEMM
+        using GemmLinear = cutlass::gemm::device::Gemm<
+                                                                float, Layout,     // shape [B*Nout, K_linear]
+                                                                float, Layout,     // shape [K_linear, C_out]
+                                                                float, Layout,     // shape [B*Nout, C_out]
+                                                                float,             // Acc
+                                                                cutlass::arch::OpClassSimt,
+                                                                cutlass::arch::Sm70
+                                                        >;
+
+        GemmLinear gemm_linear;
+        cutlass::gemm::GemmCoord problem_size_linear(B * Nout, C_out, K_linear);
+
+        cutlass::TensorRef<float const, Layout> X_ref(X_mat.data_ptr<float>(), K_linear);       // leading dim = K_linear
+        cutlass::TensorRef<float const, Layout> W_ref_linear(W_t.data_ptr<float>(), C_out);     // leading dim = C_out
+        cutlass::TensorRef<float, Layout> Y_ref(Y.data_ptr<float>(), C_out);                    // leading dim = C_out
+        cutlass::TensorRef<float, Layout> D_ref_linear = Y_ref;
+
+        typename GemmLinear::EpilogueOutputOp::Params epilogue_op_linear(1.0f, 0.0f);
+        typename GemmLinear::Arguments args_linear(
+                                                        problem_size_linear,
+                                                        X_ref,
+                                                        W_ref_linear,
+                                                        Y_ref,
+                                                        D_ref_linear,
+                                                        epilogue_op_linear
+                                                );
+
+        size_t workspace_size_linear = GemmLinear::get_workspace_size(args_linear);
+        auto workspace_linear = torch::empty({static_cast<int64_t>(workspace_size_linear)},
+                                        input.options().dtype(torch::kUInt8));
+
+        auto status_linear = gemm_linear.initialize(args_linear, workspace_linear.data_ptr());
+        if (status_linear != cutlass::Status::kSuccess) {
+                throw std::runtime_error("CUTLASS GEMM (Linear) initialization failed");
+        }
+        status_linear = gemm_linear();
+        if (status_linear != cutlass::Status::kSuccess) {
+                throw std::runtime_error("CUTLASS GEMM (Linear) execution failed");
+        }
+
+        // Add bias
+        Y = Y + linear_bias.view({1, C_out});
+        auto final_output = Y.view({B, Nout, C_out});
+
+        return {final_output, pconv_output};
 }

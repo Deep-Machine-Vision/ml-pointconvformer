@@ -15,7 +15,12 @@ setup(
         CUDAExtension('pcf_cuda', [
             'pcf_cuda.cpp',
             'pcf_cuda_kernel.cu',
-        ], extra_compile_args={'nvcc': ['-L/usr/local/cuda/lib64 -lcudadevrt -lcudart']})
+        ],
+        include_dirs=[
+            '/nfs/stak/users/sivakuml/hpc-memory/cutlass/cutlass/include',
+            '/nfs/stak/users/sivakuml/hpc-memory/cutlass/cutlass/tools/util/include',
+            ],
+        extra_compile_args={'nvcc': ['-L/usr/local/cuda/lib64 -lcudadevrt -lcudart']})
     ],
     cmdclass={
         'build_ext': BuildExtension

@@ -10,6 +10,7 @@ from test_kernels import (
     PConv, 
     PConvLinear, 
     PConvLinearOpt,
+    PConvLinearCutlass,
     create_inverse_python
 )
 
@@ -135,6 +136,11 @@ def profile_pconv_memory(n_points=100000, K=64):
     pconv_linear_opt.linear.bias.data.copy_(linear_bias)
     pconv_linear_opt = pconv_linear_opt.cuda()
 
+    pconv_linear_cutlass = PConvLinearCutlass((C_in + C_add) * C_mid, C_out)
+    pconv_linear_cutlass.linear.weight.data.copy_(linear_weights)
+    pconv_linear_cutlass.linear.bias.data.copy_(linear_bias)
+    pconv_linear_cutlass = pconv_linear_cutlass.cuda()
+
     # Dummy gradient
     grad_output = torch.randn(B, n_points, C_out, device=device)
 
@@ -152,6 +158,11 @@ def profile_pconv_memory(n_points=100000, K=64):
         {
             "name": "Optimized Fused (PConvLinearOpt)",
             "forward": lambda: pconv_linear_opt(input_features, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx, weights, additional_features),
+            "backward": lambda out: out.backward(grad_output)
+        },
+        {
+            "name": "Cutlass (PConvLinearCutlass)",
+            "forward": lambda: pconv_linear_cutlass(input_features, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx, weights, additional_features),
             "backward": lambda out: out.backward(grad_output)
         }
     ]
@@ -175,6 +186,9 @@ def profile_pconv_memory(n_points=100000, K=64):
         if "pconv_linear_opt" in locals():
             pconv_linear_opt.linear.weight.grad = None
             pconv_linear_opt.linear.bias.grad = None
+        if "pconv_linear_cutlass" in locals():
+            pconv_linear_cutlass.linear.weight.grad = None
+            pconv_linear_cutlass.linear.bias.grad = None
 
         # Forward pass
         before_forward = memory_usage_stats()
