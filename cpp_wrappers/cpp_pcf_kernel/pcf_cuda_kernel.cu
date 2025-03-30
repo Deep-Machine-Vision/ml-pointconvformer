@@ -1269,7 +1269,10 @@ std::vector<torch::Tensor> pconv_linear_cutlass_forward(
                                                                 float, Layout,          // C & D
                                                                 float,                  // Accumulator
                                                                 cutlass::arch::OpClassSimt,
-                                                                cutlass::arch::Sm70
+                                                                cutlass::arch::Sm70,
+                                                                cutlass::gemm::GemmShape<64, 64, 8>,   // Threadblock tile size
+                                                                cutlass::gemm::GemmShape<32, 32, 8>,   // Warp tile size
+                                                                cutlass::gemm::GemmShape<1, 1, 1>      // Instruction tile size
                                                         >;
 
         Gemm gemm_op;
@@ -1339,7 +1342,10 @@ std::vector<torch::Tensor> pconv_linear_cutlass_forward(
                                                                 float, Layout,     // shape [B*Nout, C_out]
                                                                 float,             // Acc
                                                                 cutlass::arch::OpClassSimt,
-                                                                cutlass::arch::Sm70
+                                                                cutlass::arch::Sm70,
+                                                                cutlass::gemm::GemmShape<64, 64, 8>,
+                                                                cutlass::gemm::GemmShape<32, 32, 8>,
+                                                                cutlass::gemm::GemmShape<1, 1, 1>
                                                         >;
 
         GemmLinear gemm_linear;
