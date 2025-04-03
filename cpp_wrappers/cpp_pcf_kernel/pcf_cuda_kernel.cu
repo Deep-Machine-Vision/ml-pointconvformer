@@ -1189,29 +1189,33 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
 }
 
 
-// Gather input features based on neighbor indices
-__global__ void gather_input_features_kernel(
+__global__ void gather_kernel(
         const float* input,
+        const float* additional_features,
         const int64_t* neighbor_inds,
-        float* gathered_input,
-        int B, int M, int Nout, int K, int C_in)
+        float* concatenated_output,
+        int B, int M, int Nout, int K, int C_in, int C_add)
 {
         const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        const int total = B * Nout * K * C_in;
+        const int total = B * Nout * K * (C_in + C_add);
         if (idx >= total) return;
 
-        const int b = idx / (Nout * K * C_in);
-        int rem = idx % (Nout * K * C_in);
-        const int n = rem / (K * C_in);
-        rem %= (K * C_in);
-        const int k = rem / C_in;
-        const int c = rem % C_in;
+        const int b = idx / (Nout * K * (C_in + C_add));
+        int rem = idx % (Nout * K * (C_in + C_add));
+        const int n = rem / (K * (C_in + C_add));
+        rem %= (K * (C_in + C_add));
+        const int k = rem / (C_in + C_add);
+        const int c = rem % (C_in + C_add);
 
         const int64_t neighbor_idx = neighbor_inds[b * Nout * K + n * K + k];
-        gathered_input[b * Nout * K * C_in + n * K * C_in + k * C_in + c] = 
-                                        input[b * M * C_in + neighbor_idx * C_in + c];
+        if (c < C_in) {
+                concatenated_output[idx] = input[b * M * C_in + neighbor_idx * C_in + c];
+        } else {
+                int c_add = c - C_in;
+                concatenated_output[idx] = additional_features[b * Nout * K * C_add + n * K * C_add + k * C_add + c_add];
+        }
 }
-    
+
 std::vector<torch::Tensor> pconv_linear_cutlass_forward(
         torch::Tensor input,
         torch::Tensor neighbor_inds,
@@ -1228,23 +1232,20 @@ std::vector<torch::Tensor> pconv_linear_cutlass_forward(
         const int C_mid = weights.size(3);
         const int C_add = additional_features.size(3);
         const int C_out = linear_weights.size(0);
-
         const int C_concat = C_in + C_add;
 
-        auto gathered_input = torch::zeros({B, Nout, K, C_in}, input.options());
+        auto concatenated = torch::zeros({B, Nout, K, C_concat}, input.options());
         {
                 const int threads = 256;
-                const int blocks = (B * Nout * K * C_in + threads - 1) / threads;
-                gather_input_features_kernel<<<blocks, threads>>>( 
-                                                                        input.data_ptr<float>(),
-                                                                        neighbor_inds.data_ptr<int64_t>(),
-                                                                        gathered_input.data_ptr<float>(),
-                                                                        B, M, Nout, K, C_in
-                                                                );
+                const int blocks = (B * Nout * K * C_concat + threads - 1) / threads;
+                gather_kernel<<<blocks, threads>>>(
+                                                                input.data_ptr<float>(),
+                                                                additional_features.data_ptr<float>(),
+                                                                neighbor_inds.data_ptr<int64_t>(),
+                                                                concatenated.data_ptr<float>(),
+                                                                B, M, Nout, K, C_in, C_add
+                );
         }
-
-        // [B, Nout, K, C_concat]
-        auto concatenated = torch::cat({gathered_input, additional_features}, -1).contiguous();
 
         // Reshape for batched GEMM
         // Compute: Y(j,i) = sum_{k} F(k,j)*W(k,i)
