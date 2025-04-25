@@ -2053,32 +2053,212 @@ def test_pconv_linear_cutlass():
     print(f"  Linear weights: {linear_weights.shape}")
 
 
+def test_pconv_linear_cutlass_by_resolution(
+    resolutions = [0.10, 0.05, 0.02],   # 10 cm, 5 cm, 2 cm spacing
+    bbox_size = (1.0, 1.0, 1.0),     # size of the box in meters (x_max, y_max, z_max)
+    K = 64,
+    num_runs = 5
+):
+    """
+    Test PConv + Linear optimization on grid point clouds at specified resolutions.
+
+    Args:
+        resolutions: list of point spacing (in meters)
+        bbox_size: tuple (x_max, y_max, z_max) defining the volume
+        K: number of neighbors for KNN
+        num_runs: iterations per resolution
+
+    Returns:
+        Dict of results indexed by resolution
+    """
+    device = torch.device("cuda")
+    torch.manual_seed(42)
+
+    B = 1           # batch size
+    C_in = 16       # input feature channels 
+    C_add = 16      # additional feature channels
+    C_mid = 16      # mid feature channels
+    C_out = 64      # linear output channels
+
+    results = {
+        'resolutions': resolutions,
+        'unfused':   {'forward': [], 'backward': [], 'total': [], 'memory': []},
+        'fused':     {'forward': [], 'backward': [], 'total': [], 'memory': []},
+        'opt_fused': {'forward': [], 'backward': [], 'total': [], 'memory': []},
+    }
+
+    pconv           = PConv().cuda()
+    linear_layer    = torch.nn.Linear((C_in + C_add) * C_mid, C_out).cuda()
+    pconv_linear    = PConvLinear((C_in + C_add) * C_mid, C_out).cuda()
+    pconv_linear_opt= PConvLinearCutlass((C_in + C_add) * C_mid, C_out).cuda()
+
+    grad_output = torch.randn(B, 1, C_out, device=device)
+
+    for res in resolutions:
+        x_max, y_max, z_max = bbox_size
+        xs = torch.arange(0, x_max + 1e-6, res, device=device)
+        ys = torch.arange(0, y_max + 1e-6, res, device=device)
+        zs = torch.arange(0, z_max + 1e-6, res, device=device)
+        grid = torch.stack(torch.meshgrid(xs, ys, zs, indexing='ij'), dim=-1)
+        points = grid.reshape(-1, 3)
+        n_points = points.shape[0]
+
+        print(f"\n===== Resolution {res*100:.0f} cm → {n_points} points =====")
+        input_points   = points.unsqueeze(0).requires_grad_(False)
+        input_features = torch.randn(B, n_points, C_in, device=device, requires_grad=True)
+
+        neighbor_inds = knn(input_points, input_points, K).contiguous()
+        inv_nei, inv_k, inv_idx = pcf_cuda.compute_knn_inverse(neighbor_inds, n_points)
+        torch.cuda.synchronize()
+
+        weights             = torch.randn(B, n_points, K, C_mid, device=device, requires_grad=True)
+        additional_features = torch.randn(B, n_points, K, C_add, device=device, requires_grad=True)
+
+        for mod in (linear_layer, pconv_linear.linear, pconv_linear_opt.linear):
+            mod.weight.data.normal_()
+            mod.bias.data.zero_()
+
+        # warm-up
+        for _ in range(2):
+            # ----- Unfused -----
+            out1 = linear_layer(pconv(input_features, neighbor_inds, weights, additional_features))
+            out1.backward(torch.randn_like(out1))
+            input_features.grad = weights.grad = additional_features.grad = None
+
+            # ----- Fused -----
+            out2 = pconv_linear(input_features, neighbor_inds, weights, additional_features)
+            out2.backward(torch.randn_like(out2))
+            input_features.grad = weights.grad = additional_features.grad = None
+
+            # ----- Opt Fused -----
+            out3 = pconv_linear_opt(
+                input_features, neighbor_inds, inv_nei, inv_k, inv_idx,
+                weights, additional_features
+            )
+            out3.backward(torch.randn_like(out3))
+            input_features.grad = weights.grad = additional_features.grad = None
+
+        unfused_times = {'forward': [], 'backward': [], 'memory': []}
+        fused_times   = {'forward': [], 'backward': [], 'memory': []}
+        opt_times     = {'forward': [], 'backward': [], 'memory': []}
+
+        for run in range(num_runs):
+            print(f"  Run {run+1}/{num_runs}")
+
+            # ----- Unfused -----
+            torch.cuda.empty_cache(); gc.collect()
+            torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
+            mem0 = torch.cuda.memory_allocated()
+
+            torch.cuda.synchronize(); t0 = time.time()
+            out1 = pconv(input_features, neighbor_inds, weights, additional_features)
+            out1 = linear_layer(out1)
+            torch.cuda.synchronize()
+            unf_fwd = (time.time() - t0) * 1e3
+
+            input_features.grad = weights.grad = additional_features.grad = None
+            torch.cuda.synchronize(); t0 = time.time()
+            out1.backward(torch.randn_like(out1))
+            torch.cuda.synchronize()
+            unf_bwd = (time.time() - t0) * 1e3
+
+            unf_mem = (torch.cuda.max_memory_allocated() - mem0) / (1024**2)
+            unfused_times['forward'].append(unf_fwd)
+            unfused_times['backward'].append(unf_bwd)
+            unfused_times['memory'].append(unf_mem)
+
+            # ----- Fused -----
+            torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
+            mem0 = torch.cuda.memory_allocated()
+
+            torch.cuda.synchronize(); t0 = time.time()
+            out2 = pconv_linear(input_features, neighbor_inds, weights, additional_features)
+            torch.cuda.synchronize()
+            fwd = (time.time() - t0) * 1e3
+
+            input_features.grad = weights.grad = additional_features.grad = None
+            torch.cuda.synchronize(); t0 = time.time()
+            out2.backward(torch.randn_like(out2))
+            torch.cuda.synchronize()
+            bwd = (time.time() - t0) * 1e3
+
+            mem = (torch.cuda.max_memory_allocated() - mem0) / (1024**2)
+            fused_times['forward'].append(fwd)
+            fused_times['backward'].append(bwd)
+            fused_times['memory'].append(mem)
+
+            # ----- Opt Fused -----
+            torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
+            mem0 = torch.cuda.memory_allocated()
+
+            torch.cuda.synchronize(); t0 = time.time()
+            out3 = pconv_linear_opt(
+                input_features, neighbor_inds, inv_nei, inv_k, inv_idx,
+                weights, additional_features
+            )
+            torch.cuda.synchronize()
+            fwd_o = (time.time() - t0) * 1e3
+
+            input_features.grad = weights.grad = additional_features.grad = None
+            torch.cuda.synchronize(); t0 = time.time()
+            out3.backward(torch.randn_like(out3))
+            torch.cuda.synchronize()
+            bwd_o = (time.time() - t0) * 1e3
+
+            mem_o = (torch.cuda.max_memory_allocated() - mem0) / (1024**2)
+            opt_times['forward'].append(fwd_o)
+            opt_times['backward'].append(bwd_o)
+            opt_times['memory'].append(mem_o)
+
+        for name, times in [
+            ('unfused', unfused_times),
+            ('fused',   fused_times),
+            ('opt_fused', opt_times),
+        ]:
+            results[name]['forward'].append(np.mean(times['forward']))
+            results[name]['backward'].append(np.mean(times['backward']))
+            results[name]['total'].append(np.mean(times['forward']) + np.mean(times['backward']))
+            results[name]['memory'].append(np.mean(times['memory']))
+
+            print(f"  {name.upper()} @ {res*100:.0f} cm: "
+                  f"fwd {results[name]['forward'][-1]:.1f} ms, "
+                  f"bwd {results[name]['backward'][-1]:.1f} ms, "
+                  f"mem {results[name]['memory'][-1]:.2f} MB")
+
+    return results
+
+
 if __name__ == "__main__":
-    test_pconv_linear()
-    test_pconv_linear_with_memory()
+    # test_pconv_linear()
+    # test_pconv_linear_with_memory()
 
-    test_knn_inv()
-    results = benchmark_knn_inv(
-                    point_sizes=[25000, 50000, 100000, 200000],
-                    k_values=[16, 32, 64, 128],
-                    num_runs=3
-    )
-    plot_knn_inv_benchmark(results)
+    # test_knn_inv()
+    # results = benchmark_knn_inv(
+    #                 point_sizes=[25000, 50000, 100000, 200000],
+    #                 k_values=[16, 32, 64, 128],
+    #                 num_runs=3
+    # )
+    # plot_knn_inv_benchmark(results)
 
-    test_pconv_linear_opt()
-    results = test_pconv_linear_opt_random(
-                    point_sizes=[25000, 50000, 100000, 200000],
+    # test_pconv_linear_opt()
+    # results = test_pconv_linear_opt_random(
+    #                 point_sizes=[25000, 50000, 100000, 200000],
+    #                 K=64,
+    #                 num_runs=3
+    # )
+    # plot_pconv_linear_opt_benchmark(results)
+
+    # test_cutlass_vs_cuda_kernel()
+    # test_pconv_linear_cutlass()
+
+    # results = test_pconv_linear_cutlass_random(
+    #                 point_sizes=[25000, 50000, 100000, 200000],
+    #                 K=64,
+    #                 num_runs=3
+    # )
+    # plot_pconv_linear_opt_benchmark(results)
+
+    test_pconv_linear_cutlass_by_resolution(
                     K=64,
-                    num_runs=3
+                    num_runs=10
     )
-    plot_pconv_linear_opt_benchmark(results)
-
-    test_cutlass_vs_cuda_kernel()
-    test_pconv_linear_cutlass()
-
-    results = test_pconv_linear_cutlass_random(
-                    point_sizes=[25000, 50000, 100000, 200000],
-                    K=64,
-                    num_runs=3
-    )
-    plot_pconv_linear_opt_benchmark(results)

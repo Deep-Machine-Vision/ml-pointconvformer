@@ -248,6 +248,31 @@ def replace_batchnorm(net):
 
 
 def compute_knn_inverse(pointclouds, edges_self, edges_forward, edges_propagate):
+    """
+    Compute inverse k-nearest neighbor mappings for self, forward, and propagate edges using pcf_cuda
+
+    Parameters
+    ----------
+    pointclouds : list of Tensor
+        List of point cloud tensors at each level. Each tensor has shape [B, N, ...],
+        where N is the number of points.
+    edges_self : list of Tensor
+        Each element is a [B, k] tensor of neighbor indices for self edges at each level.
+    edges_forward : list of Tensor
+        Each element is a [B, k] tensor of neighbor indices mapping from current to next level.
+    edges_propagate : list of Tensor
+        Each element is a [B, k] tensor of neighbor indices for propagation edges at each level.
+
+    Returns
+    -------
+    inv_self : list
+        [inverse_neighbors_self, inverse_k_self, inverse_idx_self], each a list of Tensors
+        mapping back from neighbor to point indices for self edges.
+    inv_forward : list
+        [inverse_neighbors_forward, inverse_k_forward, inverse_idx_forward] for forward edges.
+    inv_propagate : list
+        [inverse_neighbors_propagate, inverse_k_propagate, inverse_idx_propagate] for propagate edges.
+    """
     import pcf_cuda
 
     inverse_neighbors_self = []
