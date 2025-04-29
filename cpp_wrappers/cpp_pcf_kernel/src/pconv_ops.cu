@@ -136,7 +136,6 @@ __global__ void pconv_linear_cuda_forward_kernel(
         torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> __restrict__ final_output,
         torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> __restrict__ pconv_output)
 {
-
     extern __shared__ unsigned char memory[];
     scalar_t* shared_mem = reinterpret_cast<scalar_t*>(memory);
 
@@ -259,7 +258,6 @@ __global__ void pconv_cuda_backward_kernel(
 	const int C_add = additional_features.size(3);
     const int increment = blockDim.x / C_mid;
     const int cur_mid = threadIdx.x / increment;
-
     if (cur_mid >= C_mid) return;
 
     // Supposedly blockIdx.x should go up to B * N
@@ -407,7 +405,6 @@ __global__ void pconv_linear_fused_cuda_backward_kernel_opt(
     torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> grad_linear_weights,
     torch::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> grad_linear_bias) 
 {
-
     extern __shared__ unsigned char shared_memory[];
     scalar_t* shared_grad_intermediate = reinterpret_cast<scalar_t*>(shared_memory);
 
@@ -532,7 +529,6 @@ __global__ void input_only_backward_kernel(
     torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> grad_input,
     const int N, const int Nout, const int C_in, const int C_mid, const int C_add, const int C_out, const int input_only_points)
 {
-
     const int iter = blockIdx.x;
     const int batch_idx = iter / input_only_points;
     const int point_idx = Nout + (iter % input_only_points);    // start from Nout
@@ -588,7 +584,6 @@ __global__ void gather_kernel(
 {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int total = B * Nout * K * (C_in + C_add);
-
     if (idx >= total) return;
 
     const int b = idx / (Nout * K * (C_in + C_add));

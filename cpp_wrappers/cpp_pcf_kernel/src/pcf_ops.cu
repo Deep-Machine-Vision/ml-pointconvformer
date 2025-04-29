@@ -31,7 +31,6 @@ __global__ void pcf_cuda_forward_kernel(
     const torch::PackedTensorAccessor32<scalar_t,4,torch::RestrictPtrTraits> __restrict__ weights,
     torch::PackedTensorAccessor32<scalar_t,3,torch::RestrictPtrTraits> __restrict__ output)
 {
-
     int i,k,ii,jj,kk, iter0;
     const int B = input.size(0);
     const int N = input.size(1);
