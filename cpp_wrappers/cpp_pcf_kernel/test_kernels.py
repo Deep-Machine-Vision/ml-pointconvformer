@@ -2228,37 +2228,232 @@ def test_pconv_linear_cutlass_by_resolution(
     return results
 
 
+def benchmark_pconv_linear_with_tflops(point_sizes=[50000, 100000, 200000], K=64, num_runs=5):
+    device = torch.device("cuda")
+    torch.manual_seed(42)
+
+    B = 1
+    C_in = 16
+    C_add = 16
+    C_mid = 16
+    C_out = 64
+
+    results = {
+        'point_sizes': point_sizes,
+        'unfused': {'forward': [], 'backward': [], 'total': [], 'memory': [], 'tflops_forward': [], 'tflops_backward': []},
+        'fused': {'forward': [], 'backward': [], 'total': [], 'memory': [], 'tflops_forward': [], 'tflops_backward': []},
+        'opt_fused': {'forward': [], 'backward': [], 'total': [], 'memory': [], 'tflops_forward': [], 'tflops_backward': []}
+    }
+
+    def compute_flops(n_points, K, C_in, C_add, C_mid, C_out):
+        """
+        Estimate FLOPs for forward pass
+        """
+        # FLOPs for PConv
+        flops_pconv = n_points * K * ((C_in + C_add) * C_mid * 2)  # mul + add per neighbor
+
+        # FLOPs for Linear
+        flops_linear = n_points * ((C_in + C_add) * C_mid) * C_out * 2  # matmul
+        total_flops_forward = flops_pconv + flops_linear
+
+        # Backward FLOPs roughly ~2x forward FLOPs (general estimate for matmuls)
+        total_flops_backward = 2 * total_flops_forward
+
+        return total_flops_forward, total_flops_backward
+
+    for n_points in point_sizes:
+        print(f"\n\n===== Benchmarking with {n_points} points =====")
+
+        input_points = torch.randn(B, n_points, 3, device=device, requires_grad=True)
+        input_features = torch.randn(B, n_points, C_in, device=device, requires_grad=True)
+
+        neighbor_inds = knn(input_points, input_points, K).contiguous()
+        inverse_neighbors, inverse_k, inverse_idx = pcf_cuda.compute_knn_inverse(neighbor_inds, input_features.shape[1])
+
+        weights = torch.randn(B, n_points, K, C_mid, device=device, requires_grad=True)
+        additional_features = torch.randn(B, n_points, K, C_add, device=device, requires_grad=True)
+        linear_weights = torch.randn(C_out, (C_in + C_add) * C_mid, device=device, requires_grad=True)
+        linear_bias = torch.randn(C_out, device=device, requires_grad=True)
+
+        pconv = PConv()
+        linear_layer = torch.nn.Linear((C_in + C_add) * C_mid, C_out).to(device)
+        linear_layer.weight.data.copy_(linear_weights)
+        linear_layer.bias.data.copy_(linear_bias)
+
+        pconv_linear = PConvLinear((C_in + C_add) * C_mid, C_out).cuda()
+        pconv_linear.linear.weight.data.copy_(linear_weights)
+        pconv_linear.linear.bias.data.copy_(linear_bias)
+
+        pconv_linear_opt = PConvLinearCutlass((C_in + C_add) * C_mid, C_out).cuda()
+        pconv_linear_opt.linear.weight.data.copy_(linear_weights)
+        pconv_linear_opt.linear.bias.data.copy_(linear_bias)
+
+        grad_output = torch.randn(B, n_points, C_out, device=device)
+
+        # Warm-up
+        for _ in range(2):
+            out = linear_layer(pconv(input_features, neighbor_inds, weights, additional_features))
+            out.backward(grad_output)
+
+            out = pconv_linear(input_features, neighbor_inds, weights, additional_features)
+            out.backward(grad_output)
+
+            out = pconv_linear_opt(input_features, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx,
+                                   weights, additional_features)
+            out.backward(grad_output)
+
+        unfused_times = {'forward': [], 'backward': [], 'memory': []}
+        fused_times = {'forward': [], 'backward': [], 'memory': []}
+        opt_fused_times = {'forward': [], 'backward': [], 'memory': []}
+
+        for r in range(num_runs):
+            # ----- Unfused -----
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
+            mem_before = torch.cuda.memory_allocated()
+
+            start = time.time()
+            out_unfused = linear_layer(pconv(input_features, neighbor_inds, weights, additional_features))
+            torch.cuda.synchronize()
+            forward_time = time.time() - start
+
+            input_features.grad = None
+            weights.grad = None
+            additional_features.grad = None
+            linear_layer.weight.grad = None
+            linear_layer.bias.grad = None
+
+            start = time.time()
+            out_unfused.backward(grad_output)
+            torch.cuda.synchronize()
+            backward_time = time.time() - start
+
+            memory_used = torch.cuda.max_memory_allocated() - mem_before
+
+            unfused_times['forward'].append(forward_time * 1000)
+            unfused_times['backward'].append(backward_time * 1000)
+            unfused_times['memory'].append(memory_used / (1024 ** 2))
+
+            # ----- Fused -----
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
+            mem_before = torch.cuda.memory_allocated()
+
+            start = time.time()
+            out_fused = pconv_linear(input_features, neighbor_inds, weights, additional_features)
+            torch.cuda.synchronize()
+            forward_time = time.time() - start
+
+            input_features.grad = None
+            weights.grad = None
+            additional_features.grad = None
+            pconv_linear.linear.weight.grad = None
+            pconv_linear.linear.bias.grad = None
+
+            start = time.time()
+            out_fused.backward(grad_output)
+            torch.cuda.synchronize()
+            backward_time = time.time() - start
+
+            memory_used = torch.cuda.max_memory_allocated() - mem_before
+
+            fused_times['forward'].append(forward_time * 1000)
+            fused_times['backward'].append(backward_time * 1000)
+            fused_times['memory'].append(memory_used / (1024 ** 2))
+
+            # ----- Optimized Fused -----
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
+            mem_before = torch.cuda.memory_allocated()
+
+            start = time.time()
+            out_opt_fused = pconv_linear_opt(input_features, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx,
+                                             weights, additional_features)
+            torch.cuda.synchronize()
+            forward_time = time.time() - start
+
+            input_features.grad = None
+            weights.grad = None
+            additional_features.grad = None
+            pconv_linear_opt.linear.weight.grad = None
+            pconv_linear_opt.linear.bias.grad = None
+
+            start = time.time()
+            out_opt_fused.backward(grad_output)
+            torch.cuda.synchronize()
+            backward_time = time.time() - start
+
+            memory_used = torch.cuda.max_memory_allocated() - mem_before
+
+            opt_fused_times['forward'].append(forward_time * 1000)
+            opt_fused_times['backward'].append(backward_time * 1000)
+            opt_fused_times['memory'].append(memory_used / (1024 ** 2))
+
+        # FLOP calc
+        flops_fwd, flops_bwd = compute_flops(n_points, K, C_in, C_add, C_mid, C_out)
+
+        for impl, times in [('unfused', unfused_times),
+                            ('fused', fused_times),
+                            ('opt_fused', opt_fused_times)]:
+            fwd_mean = np.mean(times['forward']) / 1000     # sec
+            bwd_mean = np.mean(times['backward']) / 1000    # sec
+
+            tflops_forward = (flops_fwd / 1e12) / fwd_mean
+            tflops_backward = (flops_bwd / 1e12) / bwd_mean
+
+            results[impl]['forward'].append(np.mean(times['forward']))
+            results[impl]['backward'].append(np.mean(times['backward']))
+            results[impl]['total'].append(np.mean(times['forward']) + np.mean(times['backward']))
+            results[impl]['memory'].append(np.mean(times['memory']))
+            results[impl]['tflops_forward'].append(tflops_forward)
+            results[impl]['tflops_backward'].append(tflops_backward)
+
+            print(f"\n{impl.upper()} results for {n_points} points:")
+            print(f"  Forward time: {np.mean(times['forward']):.2f} ms ({tflops_forward:.2f} TFLOPS)")
+            print(f"  Backward time: {np.mean(times['backward']):.2f} ms ({tflops_backward:.2f} TFLOPS)")
+            print(f"  Total time: {np.mean(times['forward']) + np.mean(times['backward']):.2f} ms")
+            print(f"  Memory usage: {np.mean(times['memory']):.2f} MB")
+
+    return results
+
+
 if __name__ == "__main__":
-    # test_pconv_linear()
-    # test_pconv_linear_with_memory()
+    test_pconv_linear()
+    test_pconv_linear_with_memory()
 
-    # test_knn_inv()
-    # results = benchmark_knn_inv(
-    #                 point_sizes=[25000, 50000, 100000, 200000],
-    #                 k_values=[16, 32, 64, 128],
-    #                 num_runs=3
-    # )
-    # plot_knn_inv_benchmark(results)
+    test_knn_inv()
+    results = benchmark_knn_inv(
+                    point_sizes=[25000, 50000, 100000, 200000],
+                    k_values=[16, 32, 64, 128],
+                    num_runs=3
+    )
+    plot_knn_inv_benchmark(results)
 
-    # test_pconv_linear_opt()
-    # results = test_pconv_linear_opt_random(
-    #                 point_sizes=[25000, 50000, 100000, 200000],
-    #                 K=64,
-    #                 num_runs=3
-    # )
-    # plot_pconv_linear_opt_benchmark(results)
+    test_pconv_linear_opt()
+    results = test_pconv_linear_opt_random(
+                    point_sizes=[25000, 50000, 100000, 200000],
+                    K=64,
+                    num_runs=3
+    )
+    plot_pconv_linear_opt_benchmark(results)
 
-    # test_cutlass_vs_cuda_kernel()
-    # test_pconv_linear_cutlass()
+    test_cutlass_vs_cuda_kernel()
+    test_pconv_linear_cutlass()
 
-    # results = test_pconv_linear_cutlass_random(
-    #                 point_sizes=[25000, 50000, 100000, 200000],
-    #                 K=64,
-    #                 num_runs=3
-    # )
-    # plot_pconv_linear_opt_benchmark(results)
+    results = test_pconv_linear_cutlass_random(
+                    point_sizes=[25000, 50000, 100000, 200000],
+                    K=64,
+                    num_runs=10
+    )
+    plot_pconv_linear_opt_benchmark(results)
 
     test_pconv_linear_cutlass_by_resolution(
+                    K=64,
+                    num_runs=10
+    )
+
+    results = benchmark_pconv_linear_with_tflops(
+                    point_sizes=[5000, 10000, 25000, 50000, 100000, 200000, 400000],
                     K=64,
                     num_runs=10
     )

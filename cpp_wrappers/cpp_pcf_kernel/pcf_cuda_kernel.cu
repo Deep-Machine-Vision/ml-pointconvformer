@@ -1283,7 +1283,7 @@ std::vector<torch::Tensor> pconv_linear_cutlass_forward(
                                 float, LayoutC,
                                 float,
                                 cutlass::arch::OpClassSimt,
-                                cutlass::arch::Sm70,
+                                cutlass::arch::Sm90,
                                 cutlass::gemm::GemmShape<64, 64, 8>,
                                 cutlass::gemm::GemmShape<32, 32, 8>,
                                 cutlass::gemm::GemmShape<1, 1, 1>
@@ -1346,7 +1346,7 @@ std::vector<torch::Tensor> pconv_linear_cutlass_forward(
                                 float, cutlass::layout::RowMajor,
                                 float,
                                 cutlass::arch::OpClassSimt,
-                                cutlass::arch::Sm70,
+                                cutlass::arch::Sm90,
                                 cutlass::gemm::GemmShape<64, 64, 8>,
                                 cutlass::gemm::GemmShape<32, 32, 8>,
                                 cutlass::gemm::GemmShape<1, 1, 1>
@@ -1416,7 +1416,7 @@ std::vector<torch::Tensor> pconv_linear_cutlass_forward(
                         float, LayoutC,
                         float,
                         cutlass::arch::OpClassSimt,
-                        cutlass::arch::Sm70,
+                        cutlass::arch::Sm90,
                         cutlass::gemm::GemmShape<64, 64, 8>,
                         cutlass::gemm::GemmShape<32, 32, 8>,
                         cutlass::gemm::GemmShape<1, 1, 1>
@@ -1476,7 +1476,7 @@ std::vector<torch::Tensor> pconv_linear_cutlass_forward(
                         float, cutlass::layout::RowMajor,
                         float,
                         cutlass::arch::OpClassSimt,
-                        cutlass::arch::Sm70,
+                        cutlass::arch::Sm90,
                         cutlass::gemm::GemmShape<64, 64, 8>,
                         cutlass::gemm::GemmShape<32, 32, 8>,
                         cutlass::gemm::GemmShape<1, 1, 1>
