@@ -5,6 +5,15 @@
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
+src_files = [
+    'pcf_cuda.cpp',
+    'src/pcf.cu',
+    'src/common.cu',
+    'src/knn.cu',
+    'src/pcf_ops.cu',
+    'src/pconv_ops.cu',
+]
+
 setup(
     name='PCFcuda',
     version='1.1',
@@ -12,11 +21,9 @@ setup(
     author_email='fli26@apple.com',
     description='PointConvFormer CUDA Kernel',
     ext_modules=[
-        CUDAExtension('pcf_cuda', [
-            'pcf_cuda.cpp',
-            'pcf_cuda_kernel.cu',
-        ],
+        CUDAExtension('pcf_cuda', src_files,
         include_dirs=[
+            '/nfs/stak/users/sivakuml/hpc-memory/cutlass/ml-pointconvformer/cpp_wrappers/cpp_pcf_kernel/include',
             '/nfs/stak/users/sivakuml/hpc-memory/cutlass/cutlass/include',
             '/nfs/stak/users/sivakuml/hpc-memory/cutlass/cutlass/tools/util/include',
             ],
