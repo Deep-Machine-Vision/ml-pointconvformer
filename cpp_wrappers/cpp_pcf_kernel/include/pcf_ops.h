@@ -11,7 +11,7 @@ namespace pcf {
 namespace pcf_ops {
 
 /**
- * @brief Forward pass for Point Convolution Filtering (PCF)
+ * @brief Forward pass for PointConvFormer (PCF)
  * 
  * @tparam scalar_t Data type for tensor elements
  * @param input Input features tensor [B x N x C_in]
@@ -30,7 +30,7 @@ __global__ void pcf_cuda_forward_kernel(
 );
 
 /**
- * @brief Backward pass for Point Convolution Filtering (PCF)
+ * @brief Backward pass for PointConvFormer (PCF)
  * 
  * @tparam scalar_t Data type for tensor elements
  * @param grad_output Gradient of output tensor

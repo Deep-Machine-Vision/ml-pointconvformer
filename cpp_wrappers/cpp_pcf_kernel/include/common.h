@@ -15,7 +15,7 @@ namespace pcf {
  * @brief Calculate the next power of 2 for a given integer
  * 
  * @param n Input integer
- * @return The next power of 2 greater than or equal to n
+ * @return Next power of 2 greater than or equal to n
  */
 __host__ __device__ inline int nextPowerOf2(int n) {
     n--;           // Decrement n to handle the case when n is already a power of 2
