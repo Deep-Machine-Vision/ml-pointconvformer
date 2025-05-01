@@ -12,11 +12,11 @@ namespace pcf {
 namespace knn {
 
 /**
- * @brief Count neighbors for each point in the point cloud
+ * @brief Kernel: Count neighbors for each point in the point cloud
  * 
- * @param neighbor_inds Tensor containing neighbor indices
+ * @param neighbor_inds Neighbor indices
  * @param counts Output tensor to store neighbor counts
- * @param total_points Total number of points in the point cloud
+ * @param total_points Total number of points in point cloud
  * @param start_point Starting point index
  * @param batch_idx Batch index
  */
@@ -29,11 +29,11 @@ __global__ void count_neighbors_kernel(
 );
 
 /**
- * @brief Compute inverse index mapping for KNN
+ * @brief Kernel: Compute inverse index mapping for KNN
  * 
  * @param counts Tensor containing neighbor counts
  * @param inv_idx Output tensor to store inverse indices
- * @param total_points Total number of points in the point cloud
+ * @param total_points Total number of points in point cloud
  * @param batch_idx Batch index
  */
 __global__ void compute_inv_idx_kernel(
@@ -44,14 +44,14 @@ __global__ void compute_inv_idx_kernel(
 );
 
 /**
- * @brief Fill inverse mapping for KNN
+ * @brief Kernel: Fill inverse mapping for KNN
  * 
- * @param neighbor_inds Tensor containing neighbor indices
+ * @param neighbor_inds Neighbor indices
  * @param inv_neighbors Output tensor to store inverse neighbors
  * @param inv_k Output tensor to store inverse k values
  * @param running_counts Running counts tensor
  * @param inv_idx Inverse index tensor
- * @param total_points Total number of points in the point cloud
+ * @param total_points Total number of points in point cloud
  * @param start_point Starting point index
  * @param batch_idx Batch index
  */
@@ -69,9 +69,13 @@ __global__ void fill_inverse_kernel(
 /**
  * @brief Forward pass for KNN inverse computation
  * 
- * @param neighbor_inds Neighbor indices tensor
+ * @param neighbor_inds Neighbor indices [B x N x K]
+ *        B = batch size, N = number of points, K = number of neighbors per point
  * @param total_points Total number of points
- * @return Vector of output tensors (inverse neighbors, inverse k, inverse indices)
+ * @return Vector of output tensors
+ *         - inv_neighbors: List of points that reference each target point [B, (N * K)]
+ *         - inv_k: Corresponding k-index in original neighbor_inds tensor [B, (N * K)]
+ *         - inv_idx: Prefix sum indicating start/end positions in inv_neighbors per point [B, (total_points + 1)]
  */
 std::vector<torch::Tensor> knn_inverse_cuda_forward(
     torch::Tensor neighbor_inds,

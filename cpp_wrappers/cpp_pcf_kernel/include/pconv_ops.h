@@ -11,14 +11,17 @@ namespace pcf {
 namespace pconv_ops {
 
 /**
- * @brief Forward pass for Point Convolution (PConv)
+ * @brief Kernel: Forward pass for Point Convolution (PConv)
  * 
- * @tparam scalar_t Data type for tensor elements
- * @param input Input features tensor [B x M x C_in]
- * @param neighbor_inds Neighbor indices tensor [B x N x K]
- * @param weights Weight tensor [B x N x K x C_mid]
- * @param additional_features Additional features tensor [B x N x K x C_add]
- * @param output Output tensor [B x N x (C_mid*(C_in+C_add))]
+ * @param input Input features [B x M x C_in]
+ *        B = batch size, M = number of points in the original point cloud, C_in = input channels
+ * @param neighbor_inds Neighbor indices [B x N x K]
+ *        K = number of neighbors per point
+ * @param weights Weight [B x N x K x C_mid]
+ *        C_mid = mid channels
+ * @param additional_features Additional features [B x N x K x C_add]
+ *        C_add = additional features that do not require indexing
+ * @param output Output [B x N x C_mid * (C_in + C_add)]
  */
 template <typename scalar_t>
 __global__ void pconv_cuda_forward_kernel(
@@ -30,17 +33,20 @@ __global__ void pconv_cuda_forward_kernel(
 );
 
 /**
- * @brief Forward pass for fused Point Convolution and Linear layer
+ * @brief Kernel: Forward pass for fused Point Convolution and Linear layer
  * 
- * @tparam scalar_t Data type for tensor elements
- * @param input Input features tensor [B x M x C_in]
- * @param neighbor_inds Neighbor indices tensor [B x N x K]
- * @param weights Weight tensor [B x N x K x C_mid]
- * @param additional_features Additional features tensor [B x N x K x C_add]
- * @param linear_weights Linear layer weights [C_out x (C_mid*(C_in+C_add))]
+ * @param input Input features [B x M x C_in]
+ *        B = batch size, M = number of points in the original point cloud, C_in = input channels
+ * @param neighbor_inds Neighbor indices [B x N x K]
+ *        K = number of neighbors per point
+ * @param weights Weight [B x N x K x C_mid]
+ *        C_mid = mid channels
+ * @param additional_features Additional features [B x N x K x C_add]
+ *        C_add = additional features that do not require indexing
+ * @param linear_weights Linear layer weights [C_out x (C_mid*(C_in + C_add))]
  * @param linear_bias Linear layer bias [C_out]
- * @param final_output Final output tensor [B x N x C_out]
- * @param pconv_output PConv output tensor [B x N x (C_mid*(C_in+C_add))]
+ * @param final_output Final output [B x N x C_out]
+ * @param pconv_output PConv output [B x N x C_mid * (C_in + C_add)]
  */
 template <typename scalar_t>
 __global__ void pconv_linear_cuda_forward_kernel(
@@ -55,17 +61,21 @@ __global__ void pconv_linear_cuda_forward_kernel(
 );
 
 /**
- * @brief Backward pass for Point Convolution
+ * @brief Kernel: Backward pass for Point Convolution
  * 
- * @tparam scalar_t Data type for tensor elements
- * @param grad_output
- * @param input Input features tensor [B x M x C_in]
- * @param neighbor_inds Neighbor indices tensor [B x N x K]
- * @param weights Weight tensor [B x N x K x C_mid]
- * @param additional_features Additional features tensor [B x N x K x C_add]
- * @param grad_input
- * @param grad_weights
- * @param grad_additional
+ * @param grad_output Gradient of output [B x N x (C_mid * C_in)]
+ *        B = batch size, N = number of points, C_in = input channels, C_mid = mid channels
+ * @param input Input features [B x N x C_in]
+ *        B = batch size, N = number of points, C_in = input channels
+ * @param neighbor_inds Neighbor indices [B x N x K]
+ *        K = number of neighbors per point
+ * @param weights Weight [B x N x K x C_mid]
+ *        C_mid = mid channels
+ * @param additional_features Additional features [B x N x K x C_add]
+ *        C_add = additional features that do not need gather
+ * @param grad_input [B x N x C_in]
+ * @param grad_weights [B x N x K x C_mid]
+ * @param grad_additional [B x N x K x C_add]
  */
 template <typename scalar_t>
 __global__ void pconv_cuda_backward_kernel(
@@ -80,21 +90,25 @@ __global__ void pconv_cuda_backward_kernel(
 );
 
 /**
- * @brief Backward pass for Fused Point Convolution + Linear Layer
+ * @brief Kernel: Backward pass for Fused Point Convolution + Linear Layer
  * 
- * @tparam scalar_t Data type for tensor elements
- * @param grad_output
- * @param input Input features tensor [B x M x C_in]
- * @param neighbor_inds Neighbor indices tensor [B x N x K]
- * @param weights Weight tensor [B x N x K x C_mid]
- * @param additional_features Additional features tensor [B x N x K x C_add]
- * @param linear_weights Linear layer weights [C_out x (C_mid*(C_in+C_add))]
- * @param pconv_output PConv output tensor [B x N x (C_mid*(C_in+C_add))]
- * @param grad_input
- * @param grad_weights
- * @param grad_additional
- * @param grad_linear_weights
- * @param grad_linear_bias
+ * @param grad_output Gradient of output [B x N x (C_mid * C_in)]
+ *        B = batch size, N = number of points, C_in = input channels, C_mid = mid channels
+ * @param input Input features [B x N x C_in]
+ *        B = batch size, N = number of points, C_in = input channels
+ * @param neighbor_inds Neighbor indices [B x N x K]
+ *        K = number of neighbors per point
+ * @param weights Weight [B x N x K x C_mid]
+ *        C_mid = mid channels
+ * @param additional_features Additional features [B x N x K x C_add]
+ *        C_add = additional features that do not need gather
+ * @param linear_weights Linear layer weights [C_out x (C_mid*(C_in + C_add))]
+ * @param pconv_output PConv output tensor [B x N x C_mid * (C_in + C_add)]
+ * @param grad_input [B x N x C_in]
+ * @param grad_weights [B x N x K x C_mid]
+ * @param grad_additional [B x N x K x C_add]
+ * @param grad_linear_weights [C_out x (C_mid*(C_in + C_add))]
+ * @param grad_linear_bias [C_out]
  */
 template <typename scalar_t>
 __global__ void pconv_linear_cuda_backward_kernel(
@@ -113,24 +127,23 @@ __global__ void pconv_linear_cuda_backward_kernel(
 );
 
 /**
- * @brief Backward pass for Fused Point Convolution + Linear Layer with Inverse Indices
+ * @brief Kernel: Backward pass for Fused Point Convolution + Linear Layer with Inverse Indices
  * 
- * @tparam scalar_t Data type for tensor elements
  * @param grad_output
- * @param input Input features tensor [B x M x C_in]
- * @param inverse_neighbor
- * @param inverse_neighbor_k
- * @param inverse_neighbor_idx
- * @param neighbor_inds Neighbor indices tensor [B x N x K]
- * @param weights Weight tensor [B x N x K x C_mid]
- * @param additional_features Additional features tensor [B x N x K x C_add]
+ * @param input Input features [B x M x C_in]
+ * @param inverse_neighbor [B, (N * K)]
+ * @param inverse_neighbor_k [B, (N * K)]
+ * @param inverse_neighbor_idx [B, (total_points + 1)]
+ * @param neighbor_inds Neighbor indices [B x N x K]
+ * @param weights Weight [B x N x K x C_mid]
+ * @param additional_features Additional features [B x N x K x C_add]
  * @param linear_weights Linear layer weights [C_out x (C_mid*(C_in+C_add))]
- * @param pconv_output PConv output tensor [B x N x (C_mid*(C_in+C_add))]
- * @param grad_input
- * @param grad_weights
- * @param grad_additional
- * @param grad_linear_weights
- * @param grad_linear_bias
+ * @param pconv_output PConv output [B x N x (C_mid*(C_in+C_add))]
+ * @param grad_input [B x N x C_in]
+ * @param grad_weights [B x N x K x C_mid]
+ * @param grad_additional [B x N x K x C_add]
+ * @param grad_linear_weights [C_out x (C_mid*(C_in + C_add))]
+ * @param grad_linear_bias [C_out]
  */
 template <typename scalar_t>
 __global__ void pconv_linear_fused_cuda_backward_kernel_opt(
@@ -152,17 +165,16 @@ __global__ void pconv_linear_fused_cuda_backward_kernel_opt(
 );
 
 /**
- * @brief (Input Only points) Backward pass for Fused Point Convolution + Linear Layer with Inverse Indices
+ * @brief Kernel: (Input Only points) Backward pass for Fused Point Convolution + Linear Layer with Inverse Indices
  * 
- * @tparam scalar_t Data type for tensor elements
  * @param grad_output
- * @param input Input features tensor [B x M x C_in]
- * @param inverse_neighbor
- * @param inverse_neighbor_k
- * @param inverse_neighbor_idx
- * @param weights Weight tensor [B x N x K x C_mid]
+ * @param input Input features [B x M x C_in]
+ * @param inverse_neighbor [B, (N * K)]
+ * @param inverse_neighbor_k [B, (N * K)]
+ * @param inverse_neighbor_idx [B, (total_points + 1)]
+ * @param weights Weight [B x N x K x C_mid]
  * @param linear_weights Linear layer weights [C_out x (C_mid*(C_in+C_add))]
- * @param grad_input
+ * @param grad_input [B x N x C_in]
  */
 template <typename scalar_t>
 __global__ void input_only_backward_kernel(
@@ -178,12 +190,11 @@ __global__ void input_only_backward_kernel(
 );
 
 /**
- * @brief Scattered-Gather using Neighbor Indices around Input points
+ * @brief Kernel: Scattered-Gather using Neighbor Indices around Input points
  * 
- * @tparam scalar_t Data type for tensor elements
- * @param input Input features tensor [B x M x C_in]
- * @param additional_features Additional features tensor [B x N x K x C_add]
- * @param neighbor_inds Neighbor indices tensor [B x N x K]
+ * @param input Input features [B x M x C_in]
+ * @param additional_features Additional features [B x N x K x C_add]
+ * @param neighbor_inds Neighbor indices [B x N x K]
  * @param concatenated_output
  */
 __global__ void gather_kernel(
@@ -194,15 +205,6 @@ __global__ void gather_kernel(
     int B, int M, int Nout, int K, int C_in, int C_add
 );
 
-/**
- * @brief Forward pass for PConv operation
- * 
- * @param input Input features tensor
- * @param neighbor_inds Neighbor indices tensor
- * @param weights Weight tensor
- * @param additional_features Additional features tensor
- * @return Output tensor
- */
 torch::Tensor pconv_cuda_forward(
     torch::Tensor input,
     torch::Tensor neighbor_inds,
@@ -210,17 +212,6 @@ torch::Tensor pconv_cuda_forward(
     torch::Tensor additional_features
 );
 
-/**
- * @brief Forward pass for fused PConv and Linear operation
- * 
- * @param input Input features tensor
- * @param neighbor_inds Neighbor indices tensor
- * @param weights Weight tensor
- * @param additional_features Additional features tensor
- * @param linear_weights Linear layer weights
- * @param linear_bias Linear layer bias
- * @return Vector of output tensors (final_output, pconv_output)
- */
 std::vector<torch::Tensor> pconv_linear_cuda_forward(
     torch::Tensor input,
     torch::Tensor neighbor_inds,
@@ -230,16 +221,6 @@ std::vector<torch::Tensor> pconv_linear_cuda_forward(
     torch::Tensor linear_bias
 );
 
-/**
- * @brief Backward pass for PConv operation
- * 
- * @param grad_output Gradient of output tensor
- * @param input Input features tensor
- * @param neighbor_inds Neighbor indices tensor
- * @param weights Weight tensor
- * @param additional_features Additional features tensor
- * @return Vector of gradient tensors
- */
 std::vector<torch::Tensor> pconv_cuda_backward(
     torch::Tensor grad_output,
     torch::Tensor input,
@@ -248,18 +229,6 @@ std::vector<torch::Tensor> pconv_cuda_backward(
     torch::Tensor additional_features
 );
 
-/**
- * @brief Backward pass for fused PConv and Linear operation
- * 
- * @param grad_output Gradient of output tensor
- * @param input Input features tensor
- * @param neighbor_inds Neighbor indices tensor
- * @param weights Weight tensor
- * @param additional_features Additional features tensor
- * @param linear_weights Linear layer weights
- * @param pconv_output PConv output tensor
- * @return Vector of gradient tensors
- */
 std::vector<torch::Tensor> pconv_linear_cuda_backward(
     torch::Tensor grad_output,
     torch::Tensor input,
@@ -270,21 +239,6 @@ std::vector<torch::Tensor> pconv_linear_cuda_backward(
     torch::Tensor pconv_output
 );
 
-/**
- * @brief Optimized backward pass for fused PConv and Linear operation
- * 
- * @param grad_output Gradient of output tensor
- * @param input Input features tensor
- * @param inverse_neighbor Inverse neighbor tensor
- * @param inverse_neighbor_k Inverse neighbor k tensor
- * @param inverse_neighbor_idx Inverse neighbor index tensor
- * @param neighbor_inds Neighbor indices tensor
- * @param weights Weight tensor
- * @param additional_features Additional features tensor
- * @param linear_weights Linear layer weights
- * @param pconv_output PConv output tensor
- * @return Vector of gradient tensors
- */
 std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
     torch::Tensor grad_output,
     torch::Tensor input,
@@ -301,13 +255,19 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
 /**
  * @brief Forward pass for PConv and Linear using CUTLASS
  * 
- * @param input Input features tensor
- * @param neighbor_inds Neighbor indices tensor
- * @param weights Weight tensor
- * @param additional_features Additional features tensor
- * @param linear_weights Linear layer weights
- * @param linear_bias Linear layer bias
+ * @param input Input features [B x M x C_in]
+ *        B = batch size, M = number of points in the original point cloud, C_in = input channels
+ * @param neighbor_inds Neighbor indices [B x N x K]
+ *        K = number of neighbors per point
+ * @param weights Weight [B x N x K x C_mid]
+ *        C_mid = mid channels
+ * @param additional_features Additional features [B x N x K x C_add]
+ *        C_add = additional features that do not require indexing
+ * @param linear_weights Linear layer weights [C_out x (C_mid*(C_in + C_add))]
+ * @param linear_bias Linear layer bias [C_out]
  * @return Vector of output tensors
+ *         - final_output: [B x Nout x C_out] Output after applying linear layer
+ *         - pconv_output: [B x N x C_mid * (C_in + C_add)] Intermediate output after PConv, saved for gradient computation
  */
 std::vector<torch::Tensor> pconv_linear_cutlass_forward(
     torch::Tensor input,

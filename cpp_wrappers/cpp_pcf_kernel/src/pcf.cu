@@ -14,8 +14,7 @@ torch::Tensor pcf_forward(
     torch::Tensor input,
     torch::Tensor neighbor_inds,
     torch::Tensor guidance,
-    torch::Tensor weights
-)
+    torch::Tensor weights)
 {
     CHECK_INPUT(input);
     CHECK_INPUT(neighbor_inds);
@@ -42,8 +41,7 @@ torch::Tensor pconv_forward(
     torch::Tensor input,
     torch::Tensor neighbor_inds,
     torch::Tensor weights,
-    torch::Tensor additional_features
-)
+    torch::Tensor additional_features)
 {
     CHECK_INPUT(input);
     CHECK_INPUT(neighbor_inds);
@@ -59,8 +57,7 @@ std::vector<torch::Tensor> pconv_linear_forward(
     torch::Tensor weights,
     torch::Tensor additional_features,
     torch::Tensor linear_weights,
-    torch::Tensor linear_bias
-)
+    torch::Tensor linear_bias)
 {
     CHECK_INPUT(input);
     CHECK_INPUT(neighbor_inds);
@@ -150,8 +147,7 @@ std::vector<torch::Tensor> pconv_linear_cutlass(
     torch::Tensor weights,
     torch::Tensor additional_features,
     torch::Tensor linear_weights,
-    torch::Tensor linear_bias
-)
+    torch::Tensor linear_bias)
 {
     CHECK_INPUT(input);
     CHECK_INPUT(neighbor_inds);

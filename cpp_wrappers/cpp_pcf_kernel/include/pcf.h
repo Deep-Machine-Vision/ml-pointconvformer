@@ -24,7 +24,7 @@ namespace pcf {
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
 /**
- * @brief Forward pass for PointConvFormer (PCF)
+ * @brief Wrapper: Forward pass for PointConvFormer (PCF)
  * 
  * @param input Input features [B x N x C_in]
  *        B = batch size, N = number of points, C_in = input channels
@@ -43,7 +43,7 @@ torch::Tensor pcf_forward(
 );
 
 /**
- * @brief Backward pass for PointConvFormer (PCF)
+ * @brief Wrapper: Backward pass for PointConvFormer (PCF)
  * 
  * @param grad_output [B x N x (C_mid * C_in)]
  *        B = batch size, N = number of points, C_in = input channels, C_mid = mid channels
@@ -52,7 +52,6 @@ torch::Tensor pcf_forward(
  *        K = number of neighbors per point
  * @param guidance Guidance weights [B x N x K x num_heads]
  * @param weights Kernel weights [B x N x K x C_mid]
- * 
  * @return Vector of gradients:
  *         - grad_input: same shape as input [B x N x C_in]
  *         - grad_guidance: same shape as guidance [B x N x K x num_heads]
@@ -67,7 +66,7 @@ std::vector<torch::Tensor> pcf_backward(
 );
 
 /**
- * @brief Forward pass for Point Convolution (PConv)
+ * @brief Wrapper: Forward pass for Point Convolution (PConv)
  * 
  * @param input Input features [B x M x C_in]
  *        B = batch size, M = number of points in the original point cloud, C_in = input channels
@@ -77,7 +76,7 @@ std::vector<torch::Tensor> pcf_backward(
  *        C_mid = mid channels
  * @param additional_features Additional features [B x N x K x C_add]
  *        C_add = additional features that do not require indexing
- * @return Output [B x N x K x (C_mid * Cin + C_add)]
+ * @return Output [B x N x C_mid * (C_in + C_add)]
  */
 torch::Tensor pconv_forward(
     torch::Tensor input,
@@ -87,7 +86,7 @@ torch::Tensor pconv_forward(
 );
 
 /**
- * @brief Backward pass for Point Convolution (PConv)
+ * @brief Wrapper: Backward pass for Point Convolution (PConv)
  * 
  * @param grad_output Gradient of output [B x N x (C_mid * C_in)]
  *        B = batch size, N = number of points, C_in = input channels, C_mid = mid channels
@@ -102,6 +101,7 @@ torch::Tensor pconv_forward(
  * @return Vector of gradient
  *         - grad_input: same shape as input [B x N x C_in]
  *         - grad_weights: same shape as weights [B x N x K x C_mid]
+ *         - grad_additional: same shape as additional_features [B x N x K x C_add]
  */
 std::vector<torch::Tensor> pconv_backward(
     torch::Tensor grad_output,
@@ -112,7 +112,7 @@ std::vector<torch::Tensor> pconv_backward(
 );
 
 /**
- * @brief Forward pass for fused PConv and Linear operation
+ * @brief Wrapper: Forward pass for fused PConv and Linear operation
  * 
  * @param input Input features [B x M x C_in]
  *        B = batch size, M = number of points in the original point cloud, C_in = input channels
@@ -138,7 +138,7 @@ std::vector<torch::Tensor> pconv_linear_forward(
 );
 
 /**
- * @brief Backward pass for fused PConv and Linear operation
+ * @brief Wrapper: Backward pass for fused PConv and Linear operation
  * 
  * @param grad_output Gradient of output [B x N x (C_mid * C_in)]
  *        B = batch size, N = number of points, C_in = input channels, C_mid = mid channels
@@ -170,7 +170,7 @@ std::vector<torch::Tensor> pconv_linear_backward(
 );
 
 /**
- * @brief Compute KNN inverse mapping
+ * @brief Wrapper: Compute KNN inverse mapping
  * 
  * @param neighbor_inds Neighbor indices [B x N x K]
  *        B = batch size, N = number of points, K = number of neighbors per point
@@ -186,7 +186,7 @@ std::vector<torch::Tensor> compute_knn_inverse(
 );
 
 /**
- * @brief Optimized backward pass for fused PConv and Linear operation
+ * @brief Wrapper: Optimized backward pass for fused PConv and Linear operation
  * 
  * @param grad_output Gradient of output [B x N x (C_mid * C_in)]
  *        B = batch size, N = number of points, C_in = input channels, C_mid = mid channels
@@ -224,7 +224,7 @@ std::vector<torch::Tensor> pconv_linear_opt_backward(
 );
 
 /**
- * @brief Forward pass for PConv and Linear using CUTLASS
+ * @brief Wrapper: Forward pass for PConv and Linear using CUTLASS
  * 
  * @param input Input features [B x M x C_in]
  *        B = batch size, M = number of points in the original point cloud, C_in = input channels

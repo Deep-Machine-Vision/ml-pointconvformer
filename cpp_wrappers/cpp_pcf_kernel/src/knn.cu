@@ -26,18 +26,18 @@ __global__ void count_neighbors_kernel(
     torch::PackedTensorAccessor32<int32_t, 1, torch::RestrictPtrTraits> counts,
     const int total_points,
     const int start_point,
-    const int batch_idx
-) {
+    const int batch_idx)
+{
     const int local_point_idx = blockIdx.y;
     const int point_idx = start_point + local_point_idx;
     const int tid = threadIdx.x;
     const int K = neighbor_inds.size(2);
 
     for (int k = tid; k < K; k += blockDim.x) {
-        const int64_t neighbor = neighbor_inds[batch_idx][point_idx][k];
-        if (neighbor >= 0 && neighbor < total_points) {
-            atomicAdd(&counts[static_cast<int32_t>(neighbor)], 1);
-        }
+            const int64_t neighbor = neighbor_inds[batch_idx][point_idx][k];
+            if (neighbor >= 0 && neighbor < total_points) {
+                    atomicAdd(&counts[static_cast<int32_t>(neighbor)], 1);
+            }
     }
 }
 
@@ -45,13 +45,13 @@ __global__ void compute_inv_idx_kernel(
     torch::PackedTensorAccessor32<int32_t, 1, torch::RestrictPtrTraits> counts,
     torch::PackedTensorAccessor32<int32_t, 2, torch::RestrictPtrTraits> inv_idx,
     const int total_points,
-    const int batch_idx
-) {
+    const int batch_idx)
+{
     int32_t sum = 0;
     inv_idx[batch_idx][0] = 0;
     for (int i = 0; i < total_points; i++) {
-        sum += counts[i];
-        inv_idx[batch_idx][i + 1] = sum;
+            sum += counts[i];
+            inv_idx[batch_idx][i + 1] = sum;
     }
 }
 
@@ -63,47 +63,48 @@ __global__ void fill_inverse_kernel(
     torch::PackedTensorAccessor32<int32_t, 2, torch::RestrictPtrTraits> inv_idx,
     const int total_points,
     const int start_point,
-    const int batch_idx
-) {
+    const int batch_idx)
+{
     const int local_point_idx = blockIdx.y;
     const int point_idx = start_point + local_point_idx;
     const int tid = threadIdx.x;
     const int K = neighbor_inds.size(2);
 
     for (int k = tid; k < K; k += blockDim.x) {
-        const int64_t neighbor = neighbor_inds[batch_idx][point_idx][k];
-        if (neighbor >= 0 && neighbor < total_points) {
-            const int32_t pos = atomicAdd(&running_counts[static_cast<int32_t>(neighbor)], 1);
-            const int32_t idx = inv_idx[batch_idx][static_cast<int32_t>(neighbor)] + pos;
+            const int64_t neighbor = neighbor_inds[batch_idx][point_idx][k];
+            if (neighbor >= 0 && neighbor < total_points) {
+                    const int32_t pos = atomicAdd(&running_counts[static_cast<int32_t>(neighbor)], 1);
+                    const int32_t idx = inv_idx[batch_idx][static_cast<int32_t>(neighbor)] + pos;
 
-            if (idx < inv_neighbors.size(1)) {
-                inv_neighbors[batch_idx][idx] = static_cast<int32_t>(point_idx);
-                inv_k[batch_idx][idx] = static_cast<uint8_t>(k);
+                    if (idx < inv_neighbors.size(1)) {
+                            inv_neighbors[batch_idx][idx] = static_cast<int32_t>(point_idx);
+                            inv_k[batch_idx][idx] = static_cast<uint8_t>(k);
+                    }
             }
-        }
     }
 }
 
-// This function computes inverse neighborhood relationships for KNN indices:
-// inv_neighbors: List of points that reference each target point (B x total_references)
-// inv_k: Corresponding k-index in original neighbor_inds tensor (B x total_references)
-// inv_idx: Prefix sum indicating start/end positions in inv_neighbors per point (B x (total_points+1))
-//
-// 1. count_neighbors_kernel:
-// - Build histogram of how many times each point is referenced as a neighbor
-// - Process points in segments of points_this_grid to handle large point clouds
-//
-// 2. compute_inv_idx_kernel:
-// - Convert counts to prefix sum for indexing into inv_neighbors
-//
-// 3. fill_inverse_kernel:
-// - Populate inverse mappings using precomputed indices
-// - Reuse segmented processing from count_neighbors_kernel
-//
+/**
+ * This function computes inverse neighborhood relationships for KNN indices:
+ *  inv_neighbors: List of points that reference each target point (B x total_references)
+ *  inv_k: Corresponding k-index in original neighbor_inds tensor (B x total_references)
+ *  inv_idx: Prefix sum indicating start/end positions in inv_neighbors per point (B x (total_points+1))
+ *
+ * 1. count_neighbors_kernel:
+ *      - Build histogram of how many times each point is referenced as a neighbor
+ *      - Process points in segments of 'points_this_grid' to handle large point clouds
+ *
+ * 2. compute_inv_idx_kernel:
+ *      - Convert counts to prefix sum for indexing into inv_neighbors
+ *
+ * 3. fill_inverse_kernel:
+ *      - Populate inverse mappings using precomputed indices
+ *      - Reuse segmented processing from count_neighbors_kernel
+ */
 std::vector<torch::Tensor> knn_inverse_cuda_forward(
     torch::Tensor neighbor_inds,
-    const int total_points
-) {
+    const int total_points)
+{
     const int B = neighbor_inds.size(0);
     const int N = neighbor_inds.size(1);
     const int K = neighbor_inds.size(2);

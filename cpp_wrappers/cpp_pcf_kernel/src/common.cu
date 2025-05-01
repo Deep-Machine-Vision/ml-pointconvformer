@@ -7,6 +7,4 @@
 
 namespace pcf {
 
-// Definition moved to common.h as it's an inline function
-
 } // namespace pcf

@@ -11,14 +11,16 @@ namespace pcf {
 namespace pcf_ops {
 
 /**
- * @brief Forward pass for PointConvFormer (PCF)
+ * @brief Kernel: Forward pass for PointConvFormer (PCF)
  * 
- * @tparam scalar_t Data type for tensor elements
- * @param input Input features tensor [B x N x C_in]
- * @param neighbor_inds Neighbor indices tensor [B x N x K]
- * @param guidance Guidance weights tensor [B x N x K x num_heads]
- * @param weights Weight tensor [B x N x K x C_mid]
- * @param output Output tensor [B x N x (C_mid*C_in)]
+ * @param input Input features [B x N x C_in]
+ *        B = batch size, N = number of points, C_in = input channels
+ * @param neighbor_inds Neighbor indices [B x N x K]
+ *        K = number of neighbors per point
+ * @param guidance Guidance weights [B x N x K x num_heads]
+ * @param weights Weight [B x N x K x C_mid]
+ *        C_mid = mid channels
+ * @param output Output [B x N x (C_mid*C_in)]
  */
 template <typename scalar_t>
 __global__ void pcf_cuda_forward_kernel(
@@ -30,17 +32,18 @@ __global__ void pcf_cuda_forward_kernel(
 );
 
 /**
- * @brief Backward pass for PointConvFormer (PCF)
+ * @brief Kernel: Backward pass for PointConvFormer (PCF)
  * 
- * @tparam scalar_t Data type for tensor elements
- * @param grad_output Gradient of output tensor
- * @param input Input features tensor
- * @param neighbor_inds Neighbor indices tensor
- * @param guidance Guidance weights tensor
- * @param weights Weight tensor
- * @param grad_input Gradient of input tensor
- * @param grad_guidance Gradient of guidance tensor
- * @param grad_weights Gradient of weights tensor
+ * @param grad_output [B x N x (C_mid * C_in)]
+ *        B = batch size, N = number of points, C_in = input channels, C_mid = mid channels
+ * @param input Input features [B x N x C_in]
+ * @param neighbor_inds Neighbor indices [B x N x K]
+ *        K = number of neighbors per point
+ * @param guidance Guidance weights [B x N x K x num_heads]
+ * @param weights Kernel weights [B x N x K x C_mid]
+ * @param grad_input Gradient of input tensor [B x N x C_in]
+ * @param grad_guidance Gradient of guidance tensor [B x N x K x num_heads]
+ * @param grad_weights Gradient of weights tensor [B x N x K x C_mid]
  */
 template <typename scalar_t>
 __global__ void pcf_cuda_backward_kernel(
@@ -54,15 +57,6 @@ __global__ void pcf_cuda_backward_kernel(
     torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> __restrict__ grad_weights
 );
 
-/**
- * @brief Forward pass for PCF operation
- * 
- * @param input Input features tensor
- * @param neighbor_inds Neighbor indices tensor
- * @param guidance Guidance weights tensor
- * @param weights Weight tensor
- * @return Output tensor
- */
 torch::Tensor pcf_cuda_forward(
     torch::Tensor input,
     torch::Tensor neighbor_inds,
@@ -70,16 +64,6 @@ torch::Tensor pcf_cuda_forward(
     torch::Tensor weights
 );
 
-/**
- * @brief Backward pass for PCF operation
- * 
- * @param grad_output Gradient of output tensor
- * @param input Input features tensor
- * @param neighbor_inds Neighbor indices tensor
- * @param guidance Guidance weights tensor
- * @param weights Weight tensor
- * @return Vector of gradient tensors (grad_input, grad_guidance, grad_weights)
- */
 std::vector<torch::Tensor> pcf_cuda_backward(
     torch::Tensor grad_output,
     torch::Tensor input,
