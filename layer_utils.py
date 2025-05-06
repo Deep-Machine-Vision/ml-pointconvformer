@@ -36,7 +36,7 @@ class PConvLinearOptFunction(torch.autograd.Function):
                         weightnet, additional_features, linear_weights, linear_bias):
         neighbor_inds.requires_grad = False
 
-        output, pconv_output = pcf_cuda.pconv_linear_forward(
+        output, pconv_output = pcf_cuda.pconv_linear_cutlass_forward(
             input_feat, neighbor_inds, weightnet, additional_features, 
             linear_weights, linear_bias)
 
