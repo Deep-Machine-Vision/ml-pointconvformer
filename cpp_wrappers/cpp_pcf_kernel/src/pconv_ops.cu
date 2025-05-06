@@ -617,7 +617,7 @@ torch::Tensor pconv_cuda_forward(
     const int N = input.size(1);
     const int Nout = neighbor_inds.size(1);
     const int C_in = input.size(2);
-	const int C_add = additional_features.size(3);
+    const int C_add = additional_features.size(3);
     const int C_mid =  weights.size(3);
     const int numBlocks = B * Nout;
     const int numThreads = C_mid * C_in > 256 ? 256 : C_mid * C_in;
@@ -697,7 +697,12 @@ std::vector<torch::Tensor> pconv_linear_cuda_forward(
     return {final_output, pconv_output};
 }
 
-
+// Computes gradients for the Point Convolution (PConv) layer using a custom CUDA kernel.
+// Each thread processes a specific (k, c_mid) pair and:
+// - Computes partial input gradients via atomicAdd
+// - Computes per-neighbor additional feature gradients
+// - Accumulates weight gradients from input and additional contributions
+//
 std::vector<torch::Tensor> pconv_cuda_backward(
     torch::Tensor grad_output,
     torch::Tensor input,
@@ -732,6 +737,25 @@ std::vector<torch::Tensor> pconv_cuda_backward(
     return {grad_input, grad_weights, grad_additional};
 }
 
+// This function computes gradients for a fused Point Convolution (PConv) + Linear layer
+// using a single optimized CUDA kernel pconv_linear_cuda_backward_kernel.
+//
+// 1. Compute Intermediate Gradient (grad_x)
+// - Multiply grad_output by linear_weights^T to backpropagate through the linear layer
+// - Store result in shared memory to reuse in downstream computations
+//
+// 2. Additional Features Gradient
+// - Use grad_x and PConv weights to compute gradients w.r.t. additional features
+// - Write directly to grad_additional
+//
+// 3. Input Features and PConv Weights Gradients
+// - Compute input gradients by multiplying grad_x with weights and scattering to input positions
+// - Compute PConv weight gradients using both input and additional_features
+//
+// 4. Linear Layer Gradients
+// - For each output channel, computes weight gradients using grad_output and pconv_output
+// - Compute bias gradients by summing grad_output
+//
 std::vector<torch::Tensor> pconv_linear_cuda_backward(
     torch::Tensor grad_output,
     torch::Tensor input,
@@ -790,7 +814,7 @@ std::vector<torch::Tensor> pconv_linear_cuda_backward(
 //    - Cache intermediate gradients to reduce global memory accesses
 //    - Gradient Computation:
 //      - Compute PConv weight and additional feature gradients using neighbor indices
-//      - Aggregate input gradients with atomic operations
+//      - Aggregate input gradients
 //      - Compute linear layer gradients in parallel across output channels
 //
 // 2. input_only_backward_kernel:
@@ -878,6 +902,25 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
     return {grad_input, grad_weights, grad_additional, grad_linear_weights, grad_linear_bias};
 }
 
+// This function performs the forward pass for a fused Point Convolution (PConv) + Linear layer using CUTLASS-based GEMM kernels.
+//
+// 1. Gather Phase (custom CUDA gather_kernel):
+// - For each output point, gather features of its K neighbors from both input and additional_features
+// - Concatenate to form a [B, Nout, K, C_concat] tensor
+//
+// 2. PConv (Batch GEMM using CUTLASS):
+// - Each output point performs a batched GEMM: [K, C_concat] × [K, C_mid] → [C_concat, C_mid]
+// - Implemented via CUTLASS GemmBatched
+//
+// 3. Linear Projection (GEMM using CUTLASS):
+// - Flatten PConv output per point into [C_concat * C_mid]
+// - Apply linear transformation with CUTLASS Gemm kernel to compute final output
+// - Add bias
+//
+// 4. Batching Strategy:
+// - If Nout is large, input is split into manageable batches to reduce memory usage
+// - Both PConv and Linear GEMM are executed in batches accordingly
+//
 std::vector<torch::Tensor> pconv_linear_cutlass_forward(
     torch::Tensor input,
     torch::Tensor neighbor_inds,
