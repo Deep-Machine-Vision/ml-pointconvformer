@@ -1,0 +1,15 @@
+# PointConv configs
+USE_CUDA_KERNEL: True
+PCONV_OPT:      True
+BATCH_NORM:     False
+USE_PE:         False
+device:         'cuda'
+USE_VI:         False
+dropout_rate:   0.0
+droppath_rate:  0.0
+
+# Input Point Cloud configs
+NUM_POINTS: 60000
+NUM_FEATURES: 3
+K: 16
+OUT_CHANNEL: 32
