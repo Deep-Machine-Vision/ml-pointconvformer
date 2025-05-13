@@ -1,5 +1,7 @@
 # See get_default_configs() in train_ScanNet_DDP_Warmup.py
 # and get_default_configs() in model_architecture.py for the meanings of those configs
+USE_CUDA_KERNEL: True
+PCONV_OPT:      True
 BATCH_NORM:     True
 BATCH_SIZE:     16
 NUM_WORKERS:    24
@@ -20,6 +22,8 @@ TIME: False
 MAX_POINTS_NUM: 550000
 use_ASPP:       False
 NormalizedXYZ:  False
+
+post_knn:       True
 K_forward:      [16, 16, 16, 16, 16]
 K_propagate:    [16, 16, 16, 16, 16]
 K_self:         [16, 16, 16, 16, 16]

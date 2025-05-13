@@ -167,6 +167,7 @@ class ScanNetDataset(Dataset):
     def __getitem__(self, indx):
         coord, color, label, norm = self.data[indx]
 
+        # color, norm = features[:, :3], features[:, 3:]
 
         # move z to 0+
         z_min = coord[:, 2].min()

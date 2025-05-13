@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from timm.models.layers import DropPath
 
 from util.checkpoint import CheckpointFunction
-from layer_utils import PConv, PCF, index_points, VI_coordinate_transform, Linear_BN, UnaryBlock
+from layer_utils import PConv, PConvLinearOpt, PCF, index_points, VI_coordinate_transform, Linear_BN, UnaryBlock
 
 # Main PointConv/PointConvFormer Layers are:
 # PointConv, PointConvStridePE, PCFLayer, PointConvTransposePE
@@ -311,7 +311,10 @@ class PCFLayer(nn.Module):
             dense_xyz_norm,
             sparse_xyz=None,
             sparse_xyz_norm=None,
-            vi_features=None):
+            vi_features=None,
+            inv_neighbors=None,
+            inv_k=None,
+            inv_idx=None):
         """
         dense_xyz: tensor (batch_size, num_points, 3)
         dense_feats: tensor (batch_size, num_points, num_dims)
@@ -584,12 +587,19 @@ class PointConvStridePE(nn.Module):
             self.unary1 = nn.Identity()
 
         self.weightnet = WeightNet(weightnet[0], weightnet[1], efficient=True)
-        if cfg.BATCH_NORM:
-            self.linear = Linear_BN(
-                (out_channel // 4 + last_ch) * weightnet[-1], out_channel // 2, bn_ver='1d')
-        else:
-            self.linear = nn.Linear(
-                (out_channel // 4 + last_ch) * weightnet[-1], out_channel // 2)
+
+        if self.cfg.PCONV_OPT:
+            self.pconv_linear_opt = PConvLinearOpt((out_channel // 4 + last_ch) * weightnet[-1], out_channel // 2)
+            if self.cfg.BATCH_NORM:
+                self.bn = torch.nn.BatchNorm1d(out_channel // 2, momentum=0.1)
+
+        if not self.cfg.PCONV_OPT:
+            if cfg.BATCH_NORM:
+                self.linear = Linear_BN(
+                    (out_channel // 4 + last_ch) * weightnet[-1], out_channel // 2, bn_ver='1d')
+            else:
+                self.linear = nn.Linear(
+                    (out_channel // 4 + last_ch) * weightnet[-1], out_channel // 2)
 
         self.dropout = nn.Dropout(
             p=cfg.dropout_rate) if cfg.dropout_rate > 0. else nn.Identity()
@@ -619,14 +629,18 @@ class PointConvStridePE(nn.Module):
         return
 
     def forward(
-            self,
-            dense_xyz,
-            dense_feats,
-            nei_inds,
-            dense_xyz_norm,
-            sparse_xyz=None,
-            sparse_xyz_norm=None,
-            vi_features=None):
+                self,
+                dense_xyz,
+                dense_feats,
+                nei_inds,
+                dense_xyz_norm,
+                sparse_xyz=None,
+                sparse_xyz_norm=None,
+                vi_features=None,
+                inv_neighbors=None,
+                inv_k=None,
+                inv_idx=None
+            ):
         """
         dense_xyz: tensor (batch_size, num_points, 3)
         sparse_xyz: tensor (batch_size, num_points2, 3), if None, then assume sparse_xyz = dense_xyz
@@ -680,14 +694,30 @@ class PointConvStridePE(nn.Module):
             nei_inds = nei_inds.contiguous()
             weights = weights.contiguous()
             feat_pe = feat_pe.contiguous()
-            new_feat = PConv.forward(feats_x, nei_inds, weights, feat_pe)
+
+            if self.cfg.PCONV_OPT:
+                new_feat = self.pconv_linear_opt(
+                                                    feats_x, 
+                                                    nei_inds, 
+                                                    inv_neighbors, 
+                                                    inv_k, 
+                                                    inv_idx, 
+                                                    weights, 
+                                                    feat_pe
+                                                )
+                if self.cfg.BATCH_NORM:
+                    new_feat = self.bn(new_feat.permute(0, 2, 1)).permute(0, 2, 1)
+            else:
+                new_feat = PConv.forward(feats_x, nei_inds, weights, feat_pe)
         else:
             new_feat = torch.matmul(
                 input=new_feat.permute(
                     0, 1, 3, 2), other=weights).view(
                 B, M, -1)
 
-        new_feat = self.linear(new_feat)
+        if not self.cfg.PCONV_OPT:
+            new_feat = self.linear(new_feat)
+
         new_feat = F.relu(new_feat, inplace=True)
 
         # Dropout
@@ -762,12 +792,20 @@ class PointConv(nn.Module):
                 last_ch = in_channel + 3
         else:
             last_ch = in_channel
+
         self.weightnet = WeightNet(weightnet[0], weightnet[1], efficient=True)
-        if cfg.BATCH_NORM:
-            self.linear = Linear_BN(
-                last_ch * weightnet[-1], out_channel, bn_ver='1d')
-        else:
-            self.linear = nn.Linear(last_ch * weightnet[-1], out_channel)
+
+        if self.cfg.PCONV_OPT:
+            self.pconv_linear_opt = PConvLinearOpt(last_ch * weightnet[-1], out_channel)
+            if self.cfg.BATCH_NORM:
+                self.bn = torch.nn.BatchNorm1d(out_channel, momentum=0.1)
+
+        if not self.cfg.PCONV_OPT:
+            if cfg.BATCH_NORM:
+                self.linear = Linear_BN(
+                    last_ch * weightnet[-1], out_channel, bn_ver='1d')
+            else:
+                self.linear = nn.Linear(last_ch * weightnet[-1], out_channel)
 
         self.dropout = nn.Dropout(
             p=cfg.dropout_rate) if cfg.dropout_rate > 0. else nn.Identity()
@@ -779,7 +817,10 @@ class PointConv(nn.Module):
             nei_inds,
             dense_xyz_norm=None,
             sparse_xyz=None,
-            sparse_xyz_norm=None):
+            sparse_xyz_norm=None,
+            inv_neighbors=None,
+            inv_k=None,
+            inv_idx=None):
         """
         dense_xyz: tensor (batch_size, num_points, 3)
         sparse_xyz: tensor (batch_size, num_points2, 3)
@@ -821,20 +862,42 @@ class PointConv(nn.Module):
         else:
             weightNetInput = localized_xyz
 
-        gathered_feat = index_points(dense_feats, nei_inds)  # [B, M, K, in_ch]
         if self.cfg.USE_PE:
-            gathered_feat = torch.cat([gathered_feat, weightNetInput], dim=-1)
+            additional_features = weightNetInput
+            additional_features = additional_features.contiguous()
+        else:
+            additional_features = None
 
         weights = self.weightnet(weightNetInput)
 
-        # localized_xyz = localized_xyz.permute(0, 3, 2, 1)
-        # weights = self.weightnet(localized_xyz)*nei_inds_mask.permute(0,2,1).unsqueeze(dim=1)
-        new_feat = torch.matmul(
-            input=gathered_feat.permute(
-                0, 1, 3, 2), other=weights).view(
-            B, M, -1)
-        # new_feat = new_feat/nn_idx_divider.unsqueeze(dim=-1)
-        new_feat = F.relu(self.linear(new_feat), inplace=True)
+        if self.cfg.USE_CUDA_KERNEL and self.cfg.PCONV_OPT:
+            dense_feats = dense_feats.contiguous()
+            weights = weights.contiguous()
+            nei_inds = nei_inds.contiguous()
+            new_feat = self.pconv_linear_opt(
+                                                dense_feats,
+                                                nei_inds,
+                                                inv_neighbors,
+                                                inv_k,
+                                                inv_idx,
+                                                weights,
+                                                additional_features
+                                            )
+            if self.cfg.BATCH_NORM:
+                new_feat = self.bn(new_feat.permute(0, 2, 1)).permute(0, 2, 1)
+        else:
+            # Fallback
+            gathered_feat = index_points(dense_feats, nei_inds)  # [B, M, K, in_ch]
+            if self.cfg.USE_PE:
+                gathered_feat = torch.cat([gathered_feat, weightNetInput], dim=-1)
+
+            new_feat = torch.matmul(
+                input=gathered_feat.permute(
+                    0, 1, 3, 2), other=weights).view(
+                B, M, -1)
+            new_feat = self.linear(new_feat)
+
+        new_feat = F.relu(new_feat, inplace=True)
 
         # Dropout
         new_feat = self.dropout(new_feat)
@@ -904,14 +967,21 @@ class PointConvTransposePE(nn.Module):
             last_ch = 0
 
         self.weightnet = WeightNet(weightnet[0], weightnet[1], efficient=True)
-        if cfg.BATCH_NORM:
-            # self.linear = Linear_BN(
-            #                 (last_ch + out_channel) * weightnet[-1], out_channel, bn_ver='1d')
-            self.linear = Linear_BN((last_ch + in_channel) * weightnet[-1], out_channel, bn_ver='1d')
-        else:
-            self.linear = nn.Linear((last_ch + in_channel) * weightnet[-1], out_channel, bn_ver='1d')
-#            self.linear = nn.Linear(
-#                (last_ch + out_channel) * weightnet[-1], out_channel)
+
+        if self.cfg.PCONV_OPT:
+            self.pconv_linear_opt = PConvLinearOpt((last_ch + in_channel) * weightnet[-1], out_channel)
+            if self.cfg.BATCH_NORM:
+                self.bn = torch.nn.BatchNorm1d(out_channel, momentum=0.1)
+
+        if not self.cfg.PCONV_OPT:
+            if cfg.BATCH_NORM:
+                # self.linear = Linear_BN(
+                #                 (last_ch + out_channel) * weightnet[-1], out_channel, bn_ver='1d')
+                self.linear = Linear_BN((last_ch + in_channel) * weightnet[-1], out_channel, bn_ver='1d')
+            else:
+                self.linear = nn.Linear((last_ch + in_channel) * weightnet[-1], out_channel, bn_ver='1d')
+    #            self.linear = nn.Linear(
+    #                (last_ch + out_channel) * weightnet[-1], out_channel)
 
         self.dropout = nn.Dropout(
             p=cfg.dropout_rate) if cfg.dropout_rate > 0. else nn.Identity()
@@ -935,7 +1005,11 @@ class PointConvTransposePE(nn.Module):
             dense_xyz,
             dense_xyz_norm,
             dense_feats=None,
-            vi_features=None):
+            vi_features=None,
+            inv_neighbors=None,
+            inv_k=None,
+            inv_idx=None
+            ):
         """
         dense_xyz: tensor (batch_size, num_points, 3)
         sparse_xyz: tensor (batch_size, num_points2, 3)
@@ -964,29 +1038,59 @@ class PointConvTransposePE(nn.Module):
         # feats_x = self.unary1(sparse_feats)
         feats_x = sparse_feats
 
+        weights = self.weightnet(weightNetInput)
+
         if not self.cfg.USE_CUDA_KERNEL:
             gathered_feat = index_points(feats_x, nei_inds)  # [B, M, K, in_ch]
             if self.cfg.USE_PE:
                 gathered_feat = torch.cat([gathered_feat, feat_pe], dim=-1)
 
-        weights = self.weightnet(weightNetInput)
-
         if self.cfg.USE_CUDA_KERNEL:
             feats_x = feats_x.contiguous()
             nei_inds = nei_inds.contiguous()
             weights = weights.contiguous()
+
             if self.cfg.USE_PE:
                 feat_pe = feat_pe.contiguous()
-                new_feat = PConv.forward(feats_x, nei_inds, weights, feat_pe)
+
+                if self.cfg.PCONV_OPT:
+                    new_feat = self.pconv_linear_opt(
+                                                        feats_x, 
+                                                        nei_inds, 
+                                                        inv_neighbors, 
+                                                        inv_k, 
+                                                        inv_idx, 
+                                                        weights, 
+                                                        feat_pe
+                                                    )
+                    if self.cfg.BATCH_NORM:
+                        new_feat = self.bn(new_feat.permute(0, 2, 1)).permute(0, 2, 1)
+                else:
+                    new_feat = PConv.forward(feats_x, nei_inds, weights, feat_pe)
             else:
-                new_feat = PConv.forward(feats_x, nei_inds, weights)
+                if self.cfg.PCONV_OPT:
+                    new_feat = self.pconv_linear_opt(
+                                                        feats_x, 
+                                                        nei_inds, 
+                                                        inv_neighbors, 
+                                                        inv_k, 
+                                                        inv_idx, 
+                                                        weights
+                                                    )
+                    if self.cfg.BATCH_NORM:
+                        new_feat = self.bn(new_feat.permute(0, 2, 1)).permute(0, 2, 1)
+                else:
+                    new_feat = PConv.forward(feats_x, nei_inds, weights)
         else:
             new_feat = torch.matmul(
                 input=gathered_feat.permute(
                     0, 1, 3, 2), other=weights).view(
                 B, M, -1)
 
-        new_feat = F.relu(self.linear(new_feat), inplace=True)
+        if not self.cfg.PCONV_OPT:
+            new_feat = self.linear(new_feat)
+
+        new_feat = F.relu(new_feat, inplace=True)
 
         if dense_feats is not None:
             new_feat = new_feat + dense_feats

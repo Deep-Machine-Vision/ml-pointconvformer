@@ -23,7 +23,7 @@ import torch.utils.data
 import torch.distributed as dist
 from tensorboardX import SummaryWriter
 
-from util.common_util import AverageMeter, intersectionAndUnionGPU, to_device, init_seeds
+from util.common_util import AverageMeter, intersectionAndUnionGPU, to_device, init_seeds, compute_knn_inverse
 from util.logger import get_logger
 from util.lr import MultiStepWithWarmup, CosineAnnealingWarmupRestarts
 from model_architecture import PointConvFormer_Segmentation as VI_PointConv
@@ -396,14 +396,22 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler):
                         target, non_blocking=True), to_device(
                             norms, non_blocking=True)
 
+        inv_self, inv_forward, inv_propagate = None, None, None
+        if args.PCONV_OPT:
+            inv_self, inv_forward, inv_propagate = compute_knn_inverse(pointclouds, edges_self, edges_forward, edges_propagate)
+
         data_time.update(time.time() - end)
         pred = model(
-            features,
-            pointclouds,
-            edges_self,
-            edges_forward,
-            edges_propagate,
-            norms)
+                        features,
+                        pointclouds,
+                        edges_self,
+                        edges_forward,
+                        edges_propagate,
+                        norms,
+                        inv_self=inv_self,
+                        inv_forward=inv_forward,
+                        inv_propagate=inv_propagate
+                    )
         pred = pred.contiguous().view(-1, args.num_classes)
         target = target.view(-1, 1)[:, 0]
         loss = criterion(pred, target)
@@ -503,6 +511,11 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler):
 #                                'mAcc_train_batch': np.mean(intersection / (target + 1e-10)),
 #                                'allAcc_train_batch': accuracy,
 #                                'lr_train_batch': lr}
+
+        del inv_self, inv_forward, inv_propagate
+        del pred, loss, output, intersection, union, target
+        torch.cuda.empty_cache()
+
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
     accuracy_class = intersection_meter.sum / (target_meter.sum + 1e-10)
     mIoU = np.mean(iou_class)
@@ -552,16 +565,24 @@ def validate(val_loader, model, criterion):
             to_device(edges_self), to_device(edges_forward), \
             to_device(edges_propagate), to_device(target), to_device(norms)
 
+        inv_self, inv_forward, inv_propagate = None, None, None
+        if args.PCONV_OPT:
+            inv_self, inv_forward, inv_propagate = compute_knn_inverse(pointclouds, edges_self, edges_forward, edges_propagate)
+
         data_time.update(time.time() - end)
 
         with torch.no_grad():
             pred = model(
-                features,
-                pointclouds,
-                edges_self,
-                edges_forward,
-                edges_propagate,
-                norms)
+                            features,
+                            pointclouds,
+                            edges_self,
+                            edges_forward,
+                            edges_propagate,
+                            norms,
+                            inv_self=inv_self,
+                            inv_forward=inv_forward,
+                            inv_propagate=inv_propagate
+                        )
             pred = pred.contiguous().view(-1, args.num_classes)
             target = target.view(-1, 1)[:, 0]
             loss = criterion(pred, target)
@@ -605,6 +626,9 @@ def validate(val_loader, model, criterion):
                     batch_time=batch_time,
                     loss_meter=loss_meter,
                     accuracy=accuracy))
+
+        del inv_self, inv_forward, inv_propagate
+        del pred, loss, output, intersection, union, target
 
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
     # print('iou_class : ', iou_class)

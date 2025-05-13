@@ -245,3 +245,80 @@ def replace_batchnorm(net):
             setattr(net, child_name, torch.nn.Identity())
         else:
             replace_batchnorm(child)
+
+
+def compute_knn_inverse(pointclouds, edges_self, edges_forward, edges_propagate):
+    """
+    Compute inverse k-nearest neighbor mappings for self, forward, and propagate edges using pcf_cuda
+
+    Parameters
+    ----------
+    pointclouds : list of Tensor
+        List of point cloud tensors at each level. Each tensor has shape [B, N, ...],
+        where N is the number of points.
+    edges_self : list of Tensor
+        Each element is a [B, k] tensor of neighbor indices for self edges at each level.
+    edges_forward : list of Tensor
+        Each element is a [B, k] tensor of neighbor indices mapping from current to next level.
+    edges_propagate : list of Tensor
+        Each element is a [B, k] tensor of neighbor indices for propagation edges at each level.
+
+    Returns
+    -------
+    inv_self : list
+        [inverse_neighbors_self, inverse_k_self, inverse_idx_self], each a list of Tensors
+        mapping back from neighbor to point indices for self edges.
+    inv_forward : list
+        [inverse_neighbors_forward, inverse_k_forward, inverse_idx_forward] for forward edges.
+    inv_propagate : list
+        [inverse_neighbors_propagate, inverse_k_propagate, inverse_idx_propagate] for propagate edges.
+    """
+    import pcf_cuda
+
+    inverse_neighbors_self = []
+    inverse_k_self = []
+    inverse_idx_self = []
+    for edges in edges_self:
+        inv_n, inv_k, inv_idx = pcf_cuda.compute_knn_inverse(edges, edges.shape[1])
+        inverse_neighbors_self.append(inv_n)
+        inverse_k_self.append(inv_k) 
+        inverse_idx_self.append(inv_idx)
+
+    inverse_neighbors_forward = []
+    inverse_k_forward = []
+    inverse_idx_forward = []
+    for j, edges in enumerate(edges_forward):
+        # For forward edges, total points is number of points in the next level
+        total_points = pointclouds[j+1].shape[1] if j+1 < len(pointclouds) else edges.shape[1]
+        inv_n, inv_k, inv_idx = pcf_cuda.compute_knn_inverse(edges, total_points)
+        inverse_neighbors_forward.append(inv_n)
+        inverse_k_forward.append(inv_k)
+        inverse_idx_forward.append(inv_idx)
+
+    inverse_neighbors_propagate = []
+    inverse_k_propagate = []
+    inverse_idx_propagate = []
+    for j, edges in enumerate(edges_propagate):
+        # For propagate edges, total points is number of points in the current level
+        inv_n, inv_k, inv_idx = pcf_cuda.compute_knn_inverse(edges, pointclouds[j].shape[1])
+        inverse_neighbors_propagate.append(inv_n)
+        inverse_k_propagate.append(inv_k)
+        inverse_idx_propagate.append(inv_idx)
+
+    inverse_neighbors_self = to_device(inverse_neighbors_self, non_blocking=True)
+    inverse_k_self = to_device(inverse_k_self, non_blocking=True)
+    inverse_idx_self = to_device(inverse_idx_self, non_blocking=True)
+
+    inverse_neighbors_forward = to_device(inverse_neighbors_forward, non_blocking=True)
+    inverse_k_forward = to_device(inverse_k_forward, non_blocking=True)
+    inverse_idx_forward = to_device(inverse_idx_forward, non_blocking=True)
+
+    inverse_neighbors_propagate = to_device(inverse_neighbors_propagate, non_blocking=True)
+    inverse_k_propagate = to_device(inverse_k_propagate, non_blocking=True)
+    inverse_idx_propagate = to_device(inverse_idx_propagate, non_blocking=True)
+
+    inv_self = [inverse_neighbors_self, inverse_k_self, inverse_idx_self]
+    inv_forward = [inverse_neighbors_forward, inverse_k_forward, inverse_idx_forward]
+    inv_propagate = [inverse_neighbors_propagate, inverse_k_propagate, inverse_idx_propagate]
+
+    return inv_self, inv_forward, inv_propagate

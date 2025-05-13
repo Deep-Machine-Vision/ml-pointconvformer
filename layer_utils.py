@@ -30,6 +30,52 @@ def index_points(points, idx):
     return new_points
 
 
+class PConvLinearOptFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input_feat, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx,
+                        weightnet, additional_features, linear_weights, linear_bias):
+        neighbor_inds.requires_grad = False
+
+        output, pconv_output = pcf_cuda.pconv_linear_forward(
+            input_feat, neighbor_inds, weightnet, additional_features, 
+            linear_weights, linear_bias)
+
+        ctx.save_for_backward(input_feat, inverse_neighbors, inverse_k, inverse_idx, 
+                            neighbor_inds, weightnet, additional_features, 
+                            linear_weights, pconv_output)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        saved = ctx.saved_tensors
+        input_feat, inverse_neighbors, inverse_k, inverse_idx, neighbor_inds, \
+        weightnet, additional_features, linear_weights, pconv_output = saved
+
+        grad_output = grad_output.contiguous()
+
+        grads = pcf_cuda.pconv_linear_opt_backward(
+            grad_output, input_feat, inverse_neighbors, inverse_k, 
+            inverse_idx, neighbor_inds, weightnet, additional_features,
+            linear_weights, pconv_output)
+
+        return grads[0], None, None, None, None, grads[1], grads[2], grads[3], grads[4]
+
+class PConvLinearOpt(torch.nn.Module):
+    """
+    Optimized PConv + Linear fused layer
+    """
+    def __init__(self, in_features, out_features):
+        super(PConvLinearOpt, self).__init__()
+        self.linear = torch.nn.Linear(in_features, out_features)
+
+    def forward(self, input_features, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx, weightnet, additional_features=None):
+        if additional_features is None:
+            additional_features = torch.zeros(input_features.shape[0], input_features.shape[1], 
+                                          neighbor_inds.shape[2], 0, device=input_features.device)
+        return PConvLinearOptFunction.apply(input_features, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx,
+                                                weightnet, additional_features, self.linear.weight, self.linear.bias)
+
+
 class PCFFunction(torch.autograd.Function):
     '''
     Function for the PCF CUDA kernel
