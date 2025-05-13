@@ -1,6 +1,6 @@
 //
-// For licensing see accompanying LICENSE file.
-// Copyright (C) 2022-2023 Apple Inc. All Rights Reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2025 DMV Lab
 //
 #include <torch/extension.h>
 
