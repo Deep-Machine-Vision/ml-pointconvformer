@@ -19,7 +19,7 @@ fi
 
 pip install -U ipdb scikit-learn matplotlib open3d easydict
 
-pip install tensorboard timm termcolor tensorboardX
+pip install tensorboard timm termcolor tensorboardX termcolor
 
 cd cpp_wrappers/
 sh compile_wrappers.sh
