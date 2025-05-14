@@ -32,11 +32,11 @@ The minimal GPU requirement is GTX 1050 due to the use of CUDA compute capabilit
 
 1. Install dependencies
 
-One would need a working PyTorch installed. This code was tested to work in pyTorch 1.8 and 1.12, with CUDA 10.1 and 11.3 respectively.
+One would need a working PyTorch installed. This code was tested to work in pyTorch 2.7, CUDA 11.8 and GCC 9.5 respectively.
 
 One possibility is to run: 
 ```
-conda install pytorch==1.8.0 torchvision==0.9.0 torchaudio==0.8.0 cudatoolkit=10.1 -c pytorch
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 However usually you should already have an environment that takes care of pyTorch.
 

@@ -12,9 +12,9 @@ cd ml-pointconvformer
 ```
 
 **Install dependencies.** This project was tested with:
-- PyTorch 2.1 
+- PyTorch 2.7
 - CUDA 11.8
-- GCC 9.4 
+- GCC 9.5
 
 You can install PyTorch from [here](https://pytorch.org/get-started/previous-versions/).
 
