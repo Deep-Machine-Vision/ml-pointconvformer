@@ -16,8 +16,6 @@ from layers import PointConv
 from util.common_util import compute_knn_inverse
 from util.voxelize import voxelize
 
-torch.backends.cudnn.enabled = False
-
 
 def compute_trainable_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -69,24 +67,6 @@ def prepare_inputs(cfg):
 
     return xyz, feats, nei_self_list, nei_forward_list, nei_propagate_list
 
-def compute_knn_inverse_packed(xyz, nei_inds, offset, cfg):
-    """
-    Compute knn inverse for each point cloud for packed representation.
-    """
-    inv_neighbors_list = []
-    inv_k_list = []
-    inv_idx_list = []
-    for i in range(cfg.NUM_POINT_CLOUDS):
-        num_points = xyz[:, offset[i]:offset[i+1], :].shape[1]
-        inv_neighbors, inv_k, inv_idx = pcf_cuda.compute_knn_inverse(nei_inds[:, offset[i]:offset[i+1]]-offset[i], num_points)
-        inv_neighbors_list.append(inv_neighbors+offset[i])
-        inv_k_list.append(inv_k+offset[i])
-        inv_idx_list.append(inv_idx+offset[i])
-    inv_neighbors_list = torch.cat(inv_neighbors_list, dim=1)
-    inv_k_list = torch.cat(inv_k_list, dim=1)
-    inv_idx_list = torch.cat(inv_idx_list, dim=1)
-    return inv_neighbors_list, inv_k_list, inv_idx_list
-
 def build_encoder(cfg):
     """
         Build a PointConv encoder with `NUM_DOWNSAMPLING_LAYERS` layers.
@@ -106,6 +86,10 @@ def build_encoder(cfg):
     return model
 
 def test_pconv_encoder(cfg):
+    """
+    Test the PointConv encoder using random inputs
+    and a dummy loss.
+    """
     # Build Encoder
     model = build_encoder(cfg)
     model = model.to(cfg.device)
