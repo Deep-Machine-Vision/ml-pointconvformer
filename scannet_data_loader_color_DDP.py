@@ -64,7 +64,7 @@ class ScanNetDataset(Dataset):
 
         for x in torch.utils.data.DataLoader(
                 data_files,
-                collate_fn=lambda x: torch.load(x[0]), num_workers=cfg.NUM_WORKERS):
+                collate_fn=lambda x: torch.load(x[0], weights_only=False), num_workers=cfg.NUM_WORKERS):
             self.data.append(x)
 
         print('%s examples: %d' % (self.set, len(self.data)))
