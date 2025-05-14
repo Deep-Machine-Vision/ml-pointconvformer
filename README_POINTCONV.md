@@ -54,6 +54,14 @@ python tests_pointconv/test_pointconv_single.py
 python tests_pointconv/test_pointconv_packed.py 
 ```
 
+## Running PointConv Encoder
+
+You can look into [encoder.py](./tests_pointconv/encoder.py) to see an example where a batch of random point clouds in (packed representation form)[https://pytorch3d.org/docs/batching] are encoded via two PointConv layers. You can run this by:
+
+```bash
+python tests_pointconv/encoder.py 
+```
+
 ### PointConv optimizations
 To enable optimized PointConv CUDA kernels for saving peak GPU memory usage, set `USE_CUDA_KERNEL: True` and `PCONV_OPT: True` in the configuration file. Refer to ['pointconv_packed.yaml'](./test_configs/pointconv_packed.yaml). Use the fused PointConv and Linear layer forward and backward kernels, Compute kNN Inverse mapping indices for all the edges, use the inverse indices in the backward kernel to compute gradients.
 
