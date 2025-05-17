@@ -155,7 +155,7 @@ torch::Tensor pcf_cuda_forward(
     const int numThreads = C_mid * C_in > 256 ? 256 : C_mid * C_in;
     auto output = torch::zeros({B,Nout,C_mid*C_in}, input.type());
 
-    AT_DISPATCH_FLOATING_TYPES(output.type(), "pcf_cuda_forward_kernel", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(output.scalar_type(), "pcf_cuda_forward_kernel", ([&] {
 	pcf_cuda_forward_kernel<scalar_t><<<numBlocks, numThreads>>>(
                 input.packed_accessor32<scalar_t,3,torch::RestrictPtrTraits>(),
                 neighbor_inds.packed_accessor32<long,3,torch::RestrictPtrTraits>(),
@@ -186,7 +186,7 @@ std::vector<torch::Tensor> pcf_cuda_backward(
     auto grad_guidance = torch::zeros_like(guidance);
     auto grad_weights = torch::zeros_like(weights);
 
-    AT_DISPATCH_FLOATING_TYPES(grad_output.type(), "pcf_cuda_backward_kernel", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(grad_output.scalar_type(), "pcf_cuda_backward_kernel", ([&] {
 	pcf_cuda_backward_kernel<scalar_t><<<numBlocks,numThreads>>>(
                 grad_output.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
                 input.packed_accessor32<scalar_t,3,torch::RestrictPtrTraits>(),

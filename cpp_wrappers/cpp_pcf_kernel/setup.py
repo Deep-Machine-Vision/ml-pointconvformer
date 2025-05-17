@@ -28,7 +28,7 @@ setup(
     ext_modules=[
         CUDAExtension('pcf_cuda', src_files,
         include_dirs=[
-            '/nfs/stak/users/sivakuml/hpc-memory/cutlass/ml-pointconvformer/cpp_wrappers/cpp_pcf_kernel/include',
+            os.path.join(project_root, 'cpp_wrappers/cpp_pcf_kernel/include'),
             os.path.join(project_root, 'cutlass/include'),
             os.path.join(project_root, 'cutlass/tools/util/include'),
             ],

@@ -622,7 +622,7 @@ torch::Tensor pconv_cuda_forward(
 
     auto output = torch::zeros({B, Nout, C_mid * (C_in + C_add)}, input.type());
 
-    AT_DISPATCH_FLOATING_TYPES(output.type(), "pconv_cuda_forward_kernel", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(output.scalar_type(), "pconv_cuda_forward_kernel", ([&] {
     pconv_cuda_forward_kernel<scalar_t><<<numBlocks, numThreads, shared_mem_size>>>(
                 input.packed_accessor32<scalar_t,3,torch::RestrictPtrTraits>(),
                 neighbor_inds.packed_accessor32<long,3,torch::RestrictPtrTraits>(),
@@ -677,7 +677,7 @@ std::vector<torch::Tensor> pconv_linear_cuda_forward(
                                         (C_mid * (C_in + C_add))        // shared_intermediate
                                 ) * sizeof(float);
 
-    AT_DISPATCH_FLOATING_TYPES(input.type(), "pconv_linear_cuda_forward_kernel", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "pconv_linear_cuda_forward_kernel", ([&] {
                 pconv_linear_cuda_forward_kernel<scalar_t><<<grid, thread_count, shared_mem_size>>>(
                 input.packed_accessor32<scalar_t,3,torch::RestrictPtrTraits>(),
                 neighbor_inds.packed_accessor32<long,3,torch::RestrictPtrTraits>(),
@@ -717,7 +717,7 @@ std::vector<torch::Tensor> pconv_cuda_backward(
     auto grad_weights = torch::zeros_like(weights);
     auto grad_additional = torch::zeros_like(additional_features);
 
-    AT_DISPATCH_FLOATING_TYPES(grad_output.type(), "pconv_cuda_backward_kernel", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(grad_output.scalar_type(), "pconv_cuda_backward_kernel", ([&] {
                 pconv_cuda_backward_kernel<scalar_t><<<numBlocks,numThreads>>>(
                 grad_output.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
                 input.packed_accessor32<scalar_t,3,torch::RestrictPtrTraits>(),
@@ -782,7 +782,7 @@ std::vector<torch::Tensor> pconv_linear_cuda_backward(
 
     const int shared_mem_size = (C_mid * (C_in + C_add)) * sizeof(float);
 
-    AT_DISPATCH_FLOATING_TYPES(grad_output.type(), "pconv_linear_cuda_backward_kernel", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(grad_output.scalar_type(), "pconv_linear_cuda_backward_kernel", ([&] {
     pconv_linear_cuda_backward_kernel<scalar_t><<<grid, thread_count, shared_mem_size>>>(
                 grad_output.packed_accessor32<scalar_t,3,torch::RestrictPtrTraits>(),
                 input.packed_accessor32<scalar_t,3,torch::RestrictPtrTraits>(),
@@ -854,7 +854,7 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
     {
             const int total_blocks_main = B * Nout;
             dim3 grid(total_blocks_main);
-            AT_DISPATCH_FLOATING_TYPES(grad_output.type(), "pconv_linear_fused_cuda_backward_kernel_opt", ([&] {
+            AT_DISPATCH_FLOATING_TYPES(grad_output.scalar_type(), "pconv_linear_fused_cuda_backward_kernel_opt", ([&] {
             pconv_linear_fused_cuda_backward_kernel_opt<scalar_t><<<grid, thread_count, shared_mem_size>>>(
                             grad_output.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
                             input.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
@@ -880,7 +880,7 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
             const int total_blocks_input = B * input_only_points;
             dim3 grid(total_blocks_input);
 
-            AT_DISPATCH_FLOATING_TYPES(grad_output.type(), "input_only_backward_kernel", ([&] {
+            AT_DISPATCH_FLOATING_TYPES(grad_output.scalar_type(), "input_only_backward_kernel", ([&] {
             input_only_backward_kernel<scalar_t><<<grid, thread_count>>>(
                             grad_output.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
                             input.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
