@@ -29,14 +29,23 @@ def index_points(points, idx):
     new_points = points[batch_indices, idx, :]
     return new_points
 
-
+# Forward:
+# Performs the forward pass of a fused Point Convolution (PConv) + Linear layer using CUTLASS GEMMs.
+# Gathers neighbor features, applies batched GEMM for PConv,
+# then projects the result through a linear layer with optional batching for large inputs.
+#
+# Backward:
+# Computes gradients for a fused Point Convolution (PConv) + Linear layer using two CUDA kernels.
+# One handles output-point gradients including PConv and linear layers,
+# while the other covers input-only points to avoid divergence.
+# Uses precomputed reverse indices to ensure full and optimized gradient coverage.
 class PConvLinearOptFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_feat, neighbor_inds, inverse_neighbors, inverse_k, inverse_idx,
                         weightnet, additional_features, linear_weights, linear_bias):
         neighbor_inds.requires_grad = False
 
-        output, pconv_output = pcf_cuda.pconv_linear_forward(
+        output, pconv_output = pcf_cuda.pconv_linear_cutlass_forward(
             input_feat, neighbor_inds, weightnet, additional_features, 
             linear_weights, linear_bias)
 
@@ -60,6 +69,7 @@ class PConvLinearOptFunction(torch.autograd.Function):
 
         return grads[0], None, None, None, None, grads[1], grads[2], grads[3], grads[4]
 
+# Wrapper for PConvLinearOptFunction
 class PConvLinearOpt(torch.nn.Module):
     """
     Optimized PConv + Linear fused layer

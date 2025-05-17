@@ -10,6 +10,15 @@ import os
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, '../..'))
 
+src_files = [
+    'pcf_cuda.cpp',
+    'src/pcf.cu',
+    'src/common.cu',
+    'src/knn.cu',
+    'src/pcf_ops.cu',
+    'src/pconv_ops.cu',
+]
+
 setup(
     name='PCFcuda',
     version='1.1',
@@ -17,11 +26,9 @@ setup(
     author_email='loges.siva14@gmail.com',
     description='PointConvFormer CUDA Kernel',
     ext_modules=[
-        CUDAExtension('pcf_cuda', [
-            'pcf_cuda.cpp',
-            'pcf_cuda_kernel.cu',
-        ],
+        CUDAExtension('pcf_cuda', src_files,
         include_dirs=[
+            os.path.join(project_root, 'cpp_wrappers/cpp_pcf_kernel/include'),
             os.path.join(project_root, 'cutlass/include'),
             os.path.join(project_root, 'cutlass/tools/util/include'),
             ],
