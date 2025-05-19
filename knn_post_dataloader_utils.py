@@ -21,6 +21,7 @@ def knn_keops(ref_points, query_points, K):
     indices = distances.argKmin(K, dim=0)
     
     del ref_lazy, query_lazy, distances
+    assert isinstance(indices, torch.Tensor), "indices is not a torch.Tensor"
 
     return indices
 
@@ -62,6 +63,8 @@ def compute_knn(ref_points, query_points, K, dilated_rate=1, method='keops'):
         neighbors_idx = np.array(
             neighbors_idx[:, ::dilated_rate], dtype=np.int32)
 
+    if method == 'keops':
+        assert isinstance(neighbors_idx, torch.Tensor), "neighbors_idx is not a torch.Tensor"
     return neighbors_idx
 
 def tensorizeTensorList(tensor_list):
@@ -95,9 +98,9 @@ def listToBatch(edges_self, edges_forward, edges_propagate):
     num_sample = len(edges_self)
 
     # Initialize batches for the first sample
-    edgesSelfBatch = edges_self[0]
-    edgesForwardBatch = edges_forward[0]
-    edgesPropagateBatch = edges_propagate[0]
+    edgesSelfBatch = [torch.tensor(x) if isinstance(x, np.ndarray) else x for x in edges_self[0]]
+    edgesForwardBatch = [torch.tensor(x) if isinstance(x, np.ndarray) else x for x in edges_forward[0]]
+    edgesPropagateBatch = [torch.tensor(x) if isinstance(x, np.ndarray) else x for x in edges_propagate[0]]
     
     # Track the cumulative number of points stored
     points_stored = [val.shape[0] for val in edges_self[0]]
@@ -105,21 +108,24 @@ def listToBatch(edges_self, edges_forward, edges_propagate):
     for i in range(1, num_sample):
         for j in range(len(edges_forward[i])):
             # Handle edges_forward
-            tempMask = edges_forward[i][j] == -1
-            edges_forwardAdd = edges_forward[i][j] + points_stored[j]
+            edges_forwardAdd = torch.tensor(edges_forward[i][j]) if isinstance(edges_forward[i][j], np.ndarray) else edges_forward[i][j]
+            tempMask = edges_forwardAdd == -1
+            edges_forwardAdd = edges_forwardAdd + points_stored[j]
             edges_forwardAdd[tempMask] = -1
             edgesForwardBatch[j] = torch.cat([edgesForwardBatch[j], edges_forwardAdd], dim=0)
 
             # Handle edges_propagate
-            tempMask2 = edges_propagate[i][j] == -1
-            edges_propagateAdd = edges_propagate[i][j] + points_stored[j + 1]
+            edges_propagateAdd = torch.tensor(edges_propagate[i][j]) if isinstance(edges_propagate[i][j], np.ndarray) else edges_propagate[i][j]
+            tempMask2 = edges_propagateAdd == -1
+            edges_propagateAdd = edges_propagateAdd + points_stored[j + 1]
             edges_propagateAdd[tempMask2] = -1
             edgesPropagateBatch[j] = torch.cat([edgesPropagateBatch[j], edges_propagateAdd], dim=0)
 
         for j in range(len(edges_self[i])):
             # Handle edges_self
-            tempMask3 = edges_self[i][j] == -1
-            edges_selfAdd = edges_self[i][j] + points_stored[j]
+            edges_selfAdd = torch.tensor(edges_self[i][j]) if isinstance(edges_self[i][j], np.ndarray) else edges_self[i][j]
+            tempMask3 = edges_selfAdd == -1
+            edges_selfAdd = edges_selfAdd + points_stored[j]
             edges_selfAdd[tempMask3] = -1
             edgesSelfBatch[j] = torch.cat([edgesSelfBatch[j], edges_selfAdd], dim=0)
 
@@ -157,7 +163,6 @@ def compute_knn_packed(pointclouds, points_stored, K_self, K_forward, K_propagat
         nei_self_list: kNN neighbors within the same layer
     """
 
-    
     n = len(points_stored[0])
 
     nei_forward_list   = [[] for _ in range(n)]
@@ -170,11 +175,8 @@ def compute_knn_packed(pointclouds, points_stored, K_self, K_forward, K_propagat
     for i in range(n):
 
         temp_points = []
-        temp_points.append(pointclouds[0][:, points_stored[0][i]:points_stored[0][i+1], :])
-        temp_points.append(pointclouds[1][:, points_stored[1][i]:points_stored[1][i+1], :])
-        temp_points.append(pointclouds[2][:, points_stored[2][i]:points_stored[2][i+1], :])
-        temp_points.append(pointclouds[3][:, points_stored[3][i]:points_stored[3][i+1], :])
-        temp_points.append(pointclouds[4][:, points_stored[4][i]:points_stored[4][i+1], :])
+        for j in range(len(pointclouds)):
+            temp_points.append(pointclouds[j][:, points_stored[j][i]:points_stored[j][i+1], :])
         
         nei_forward_list_temp   = []
         nei_self_list_temp      = []
