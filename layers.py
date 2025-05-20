@@ -897,7 +897,8 @@ class PointConv(nn.Module):
                 B, M, -1)
             new_feat = self.linear(new_feat)
 
-        new_feat = F.relu(new_feat, inplace=True)
+        # new_feat = F.relu(new_feat, inplace=True)
+        new_feat = F.relu(new_feat)
 
         # Dropout
         new_feat = self.dropout(new_feat)

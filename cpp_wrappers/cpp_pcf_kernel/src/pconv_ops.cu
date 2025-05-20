@@ -533,10 +533,13 @@ __global__ void input_only_backward_kernel(
     const int batch_idx = iter / input_only_points;
     const int point_idx = Nout + (iter % input_only_points);    // start from Nout
     const int tid = threadIdx.x;
+    int inv_len = inverse_neighbor_idx.size(1);
 
+    if (point_idx >= inv_len) return;
     if (point_idx >= N) return;
 
     int start_idx = inverse_neighbor_idx[batch_idx][point_idx];
+    if (start_idx < 0) return; 
     if (start_idx == -1) return;                                // No neighbors reference this point
 
     int end_idx;
@@ -875,8 +878,9 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
     }
 
     // We launch a separate kernel for input-only points (Nout to N-1)
-    if (N > Nout) {
-            const int input_only_points = N - Nout;
+    int inv_len = inverse_neighbor_idx.size(1);       // this is Nout+1
+    int input_only_points = inv_len - Nout;
+    if (input_only_points > 0) {
             const int total_blocks_input = B * input_only_points;
             dim3 grid(total_blocks_input);
 
