@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from sklearn.neighbors import KDTree
 from pykeops.torch import LazyTensor
-
+from knn_nvidia_rapid_api import knn_cuvs_brute_force
 def knn_keops(ref_points, query_points, K):
     """
     Compute k-nearest neighbors using KeOps, and return indices.
@@ -57,6 +57,8 @@ def compute_knn(ref_points, query_points, K, dilated_rate=1, method='keops'):
     elif method == 'keops':
         neighbors_idx = knn_keops(ref_points, query_points, K*dilated_rate)
     
+    elif method == 'nvidia_cuvs_brute_force':
+        neighbors_idx = knn_cuvs_brute_force(ref_points, query_points, K*dilated_rate)
     else:
         raise Exception('compute_knn: unsupported knn algorithm')
     if dilated_rate > 1:
