@@ -424,92 +424,110 @@ __global__ void pconv_linear_fused_cuda_backward_kernel_opt(
     const int point_idx = iter % Nout;
     const int tid = threadIdx.x;
 
-    if (batch_idx >= B) return;
+    if (batch_idx >= B || point_idx >= Nout) return;
 
-    // We focus on output points first
-    if (point_idx < Nout) {
-            if (tid < C_out) {
-                    atomicAdd(&grad_linear_bias[tid], grad_output[batch_idx][point_idx][tid]);
+    // Process output points
+    if (tid < C_out) {
+            atomicAdd(&grad_linear_bias[tid], grad_output[batch_idx][point_idx][tid]);
+    }
+
+    for (int c = tid; c < total_channels; c += blockDim.x) {
+            scalar_t sum = 0;
+            for (int co = 0; co < C_out; co++) {
+                    sum += grad_output[batch_idx][point_idx][co] * linear_weights[co][c];
             }
+            shared_grad_intermediate[c] = sum;
+    }
 
-            for (int c = tid; c < total_channels; c += blockDim.x) {
-                    scalar_t sum = 0;
-                    for (int co = 0; co < C_out; co++) {
-                            sum += grad_output[batch_idx][point_idx][co] * linear_weights[co][c];
-                    }
-                    shared_grad_intermediate[c] = sum;
-            }
+    __syncthreads();
 
-            __syncthreads();
+    // Process weight gradients
+    for (int idx = tid; idx < K * C_mid; idx += blockDim.x) {
+            const int k = idx % K;
+            const int mid_idx = idx / K;
+            scalar_t weight_grad = 0;
 
-            for (int idx = tid; idx < K * C_mid; idx += blockDim.x) {
-                    const int k = idx % K;
-                    const int mid_idx = idx / K;
-                    scalar_t weight_grad = 0;
+            const long n_idx_long = neighbor_inds[batch_idx][point_idx][k];
+            const int32_t n_idx = static_cast<int32_t>(n_idx_long);
 
-                    // Input features contribution
-                    const int n_idx = neighbor_inds[batch_idx][point_idx][k];
-                    if (n_idx >= 0 && n_idx < N) {
-                            for (int c_in = 0; c_in < C_in; c_in++) {
-                                    const int grad_idx = mid_idx * (C_in + C_add) + c_in;
+            if (n_idx >= 0 && n_idx < N && n_idx < static_cast<int32_t>(input.size(1))) {
+                    for (int c_in = 0; c_in < C_in; c_in++) {
+                            const int grad_idx = mid_idx * (C_in + C_add) + c_in;
+                            if (grad_idx < total_channels) {
                                     weight_grad += shared_grad_intermediate[grad_idx] * input[batch_idx][n_idx][c_in];
                             }
                     }
-
-                    // Additional features contribution
-                    #pragma unroll 4
-                    for (int c_add = 0; c_add < C_add; c_add++) {
-                            const int grad_idx = mid_idx * (C_in + C_add) + C_in + c_add;
-                            weight_grad += shared_grad_intermediate[grad_idx] * 
-                                            additional_features[batch_idx][point_idx][k][c_add];
-                    }
-
-                    grad_weights[batch_idx][point_idx][k][mid_idx] = weight_grad;
             }
 
-            for (int idx = tid; idx < K * C_add; idx += blockDim.x) {
-                    const int k = idx % K;
-                    const int c_add = idx / K;
-                    scalar_t add_grad = 0;
+            // Additional features contribution
+            for (int c_add = 0; c_add < C_add; c_add++) {
+                    const int grad_idx = mid_idx * (C_in + C_add) + C_in + c_add;
+                    if (grad_idx < total_channels) {
+                            weight_grad += shared_grad_intermediate[grad_idx] * 
+                                        additional_features[batch_idx][point_idx][k][c_add];
+                    }
+            }
 
-                    #pragma unroll 4
-                    for (int mid_idx = 0; mid_idx < C_mid; mid_idx++) {
-                            const int grad_idx = mid_idx * (C_in + C_add) + C_in + c_add;
+            grad_weights[batch_idx][point_idx][k][mid_idx] = weight_grad;
+    }
+
+    // Process additional feature gradients
+    for (int idx = tid; idx < K * C_add; idx += blockDim.x) {
+            const int k = idx % K;
+            const int c_add = idx / K;
+            scalar_t add_grad = 0;
+
+            for (int mid_idx = 0; mid_idx < C_mid; mid_idx++) {
+                    const int grad_idx = mid_idx * (C_in + C_add) + C_in + c_add;
+                    if (grad_idx < total_channels) {
                             add_grad += shared_grad_intermediate[grad_idx] * weights[batch_idx][point_idx][k][mid_idx];
                     }
-
-                    grad_additional[batch_idx][point_idx][k][c_add] = add_grad;
             }
 
-            for (int k = 0; k < K; k++) {
-                    const int n_idx = neighbor_inds[batch_idx][point_idx][k];
+            grad_additional[batch_idx][point_idx][k][c_add] = add_grad;
+    }
 
-                    if (n_idx >= 0 && n_idx < N) {
+    for (int k = 0; k < K; k++) {
+            const long n_idx_long = neighbor_inds[batch_idx][point_idx][k];
+            const int32_t n_idx = static_cast<int32_t>(n_idx_long);
 
-                            for (int c_in = tid; c_in < C_in; c_in += blockDim.x) {
-                                    scalar_t input_grad = 0;
+            if (n_idx >= 0 && 
+                n_idx < N && 
+                n_idx < static_cast<int32_t>(input.size(1)) && 
+                n_idx < static_cast<int32_t>(grad_input.size(1))) {
 
-                                    #pragma unroll 4
-                                    for (int mid_idx = 0; mid_idx < C_mid; mid_idx++) {
-                                            const int grad_idx = mid_idx * (C_in + C_add) + c_in;
+                    for (int c_in = tid; c_in < C_in; c_in += blockDim.x) {
+                            scalar_t input_grad = 0;
+
+                            for (int mid_idx = 0; mid_idx < C_mid; mid_idx++) {
+                                    const int grad_idx = mid_idx * (C_in + C_add) + c_in;
+                                    if (grad_idx < total_channels) {
                                             input_grad += shared_grad_intermediate[grad_idx] * weights[batch_idx][point_idx][k][mid_idx];
                                     }
+                            }
 
+                            if (c_in < C_in && c_in < static_cast<int>(grad_input.size(2))) {
                                     atomicAdd(&grad_input[batch_idx][n_idx][c_in], input_grad);
                             }
                     }
             }
+    }
 
-            const int linear_chunk_size = (total_channels + blockDim.x - 1) / blockDim.x;
-            const int start_idx = tid * linear_chunk_size;
-            const int end_idx = min(start_idx + linear_chunk_size, total_channels);
+    // Linear weights gradient computation
+    const int linear_chunk_size = (total_channels + blockDim.x - 1) / blockDim.x;
+    const int start_idx = tid * linear_chunk_size;
+    const int end_idx = min(start_idx + linear_chunk_size, total_channels);
 
-            for (int c_out = 0; c_out < C_out; c_out++) {
-                    const scalar_t grad_out = grad_output[batch_idx][point_idx][c_out];
+    for (int c_out = 0; c_out < C_out; c_out++) {
+            const scalar_t grad_out = grad_output[batch_idx][point_idx][c_out];
 
-                    for (int c = start_idx; c < end_idx; c++) {
+            for (int c = start_idx; c < end_idx; c++) {
+                    if (c < total_channels && 
+                            c_out < C_out && 
+                            c < static_cast<int>(grad_linear_weights.size(1)) &&
+                            c_out < static_cast<int>(grad_linear_weights.size(0))) {
                             atomicAdd(&grad_linear_weights[c_out][c], 
-                                    grad_out * pconv_output[batch_idx][point_idx][c]);
+                                        grad_out * pconv_output[batch_idx][point_idx][c]);
                     }
             }
     }
@@ -531,50 +549,72 @@ __global__ void input_only_backward_kernel(
 {
     const int iter = blockIdx.x;
     const int batch_idx = iter / input_only_points;
-    const int point_idx = Nout + (iter % input_only_points);    // start from Nout
+    const int local_point_idx = iter % input_only_points;
+    const int point_idx = Nout + local_point_idx;
     const int tid = threadIdx.x;
-    int inv_len = inverse_neighbor_idx.size(1);
 
-    if (point_idx >= inv_len) return;
+    if (batch_idx >= static_cast<int>(grad_output.size(0))) return;
     if (point_idx >= N) return;
+    if (point_idx >= static_cast<int>(inverse_neighbor_idx.size(1))) return;
+    if (local_point_idx >= input_only_points) return;
 
-    int start_idx = inverse_neighbor_idx[batch_idx][point_idx];
-    if (start_idx < 0) return; 
-    if (start_idx == -1) return;                                // No neighbors reference this point
+    const int start_idx = inverse_neighbor_idx[batch_idx][point_idx];
+    if (start_idx < 0 || start_idx == -1) return;  // No neighbors reference this point
 
     int end_idx;
-    if (point_idx < N - 1) {
+    if (point_idx < N - 1 && point_idx + 1 < static_cast<int>(inverse_neighbor_idx.size(1))) {
             int next_idx = point_idx + 1;
-            while (next_idx < N && inverse_neighbor_idx[batch_idx][next_idx] == -1) {
+            while (next_idx < N && 
+                    next_idx < static_cast<int>(inverse_neighbor_idx.size(1)) && 
+                    inverse_neighbor_idx[batch_idx][next_idx] == -1) {
                     next_idx++;
             }
-            end_idx = (next_idx < N) ? inverse_neighbor_idx[batch_idx][next_idx] : inverse_neighbor.size(1);
+            end_idx = (next_idx < N && next_idx < static_cast<int>(inverse_neighbor_idx.size(1))) ? 
+                        inverse_neighbor_idx[batch_idx][next_idx] : static_cast<int>(inverse_neighbor.size(1));
     } else {
-            end_idx = inverse_neighbor.size(1);
+            end_idx = static_cast<int>(inverse_neighbor.size(1));
     }
+
+    end_idx = min(end_idx, static_cast<int>(inverse_neighbor.size(1)));
 
     for (int c_in = tid; c_in < C_in; c_in += blockDim.x) {
             scalar_t grad_sum = 0;
 
             for (int inv_idx = start_idx; inv_idx < end_idx; inv_idx++) {
+                    if (inv_idx >= static_cast<int>(inverse_neighbor.size(1))) break;
+
                     const int n_out = inverse_neighbor[batch_idx][inv_idx];
                     const int k_idx = inverse_neighbor_k[batch_idx][inv_idx];
+
+                    if (n_out < 0 || n_out >= Nout) continue;
+                    if (k_idx < 0 || k_idx >= static_cast<int>(weights.size(2))) continue;
+                    if (n_out >= static_cast<int>(weights.size(1))) continue;
 
                     for (int mid_idx = 0; mid_idx < C_mid; mid_idx++) {
                             const int pconv_idx = mid_idx * (C_in + C_add) + c_in;
 
+                            if (pconv_idx >= static_cast<int>(linear_weights.size(1))) continue;
+
                             scalar_t grad_through_linear = 0;
 
-                            #pragma unroll 4
-                            for (int c_out = 0; c_out < C_out; c_out++) {
-                                    grad_through_linear += grad_output[batch_idx][n_out][c_out] * linear_weights[c_out][pconv_idx];
+                            for (int c_out_idx = 0; c_out_idx < C_out; c_out_idx++) {
+                                    if (c_out_idx >= static_cast<int>(grad_output.size(2))) break;
+                                    if (n_out >= static_cast<int>(grad_output.size(1))) break;
+
+                                    grad_through_linear += grad_output[batch_idx][n_out][c_out_idx] * 
+                                                            linear_weights[c_out_idx][pconv_idx];
                             }
 
-                            grad_sum += grad_through_linear * weights[batch_idx][n_out][k_idx][mid_idx];
+                            if (mid_idx < static_cast<int>(weights.size(3))) {
+                                    grad_sum += grad_through_linear * weights[batch_idx][n_out][k_idx][mid_idx];
+                            }
                     }
             }
 
-            grad_input[batch_idx][point_idx][c_in] = grad_sum;
+            if (c_in < static_cast<int>(grad_input.size(2)) && 
+                    point_idx < static_cast<int>(grad_input.size(1))) {
+                    grad_input[batch_idx][point_idx][c_in] = grad_sum;
+            }
     }
 }
 
@@ -841,6 +881,13 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
     const int C_add = additional_features.size(3);
     const int C_out = grad_output.size(2);
 
+//     TORCH_CHECK(N >= Nout, "Input points N must be >= output points Nout");
+    TORCH_CHECK(inverse_neighbor_idx.size(1) >= N, "inverse_neighbor_idx size must be >= N");
+
+    TORCH_CHECK(neighbor_inds.max().item<long>() < N, 
+                "neighbor_inds contains out-of-bounds indices: max=" + 
+                std::to_string(neighbor_inds.max().item<long>()) + ", N=" + std::to_string(N));
+
     auto grad_input = torch::zeros_like(input);
     auto grad_weights = torch::zeros_like(weights);
     auto grad_additional = torch::zeros_like(additional_features);
@@ -851,7 +898,7 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
     const int total_work = std::max({C_in, K * C_mid, K * C_add, C_out});
     const int thread_count = std::min(max_threads_per_block, nextPowerOf2(total_work));
 
-    const int shared_mem_size = (C_mid * (C_in + C_add)) * sizeof(float);
+    const int shared_mem_size = (C_mid * (C_in + C_add)) * input.element_size();
 
     // Main kernel for output points (0 to Nout-1)
     {
@@ -878,8 +925,7 @@ std::vector<torch::Tensor> pconv_linear_opt_cuda_backward(
     }
 
     // We launch a separate kernel for input-only points (Nout to N-1)
-    int inv_len = inverse_neighbor_idx.size(1);       // this is Nout+1
-    int input_only_points = inv_len - Nout;
+    int input_only_points = N - Nout;
     if (input_only_points > 0) {
             const int total_blocks_input = B * input_only_points;
             dim3 grid(total_blocks_input);

@@ -278,8 +278,9 @@ def compute_knn_inverse(pointclouds, edges_self, edges_forward, edges_propagate)
     inverse_neighbors_self = []
     inverse_k_self = []
     inverse_idx_self = []
-    for edges in edges_self:
-        inv_n, inv_k, inv_idx = pcf_cuda.compute_knn_inverse(edges, edges.shape[1])
+    for j, edges in enumerate(edges_self):
+        total_points = pointclouds[j].shape[1]  # Current level point count
+        inv_n, inv_k, inv_idx = pcf_cuda.compute_knn_inverse(edges, total_points)
         inverse_neighbors_self.append(inv_n)
         inverse_k_self.append(inv_k) 
         inverse_idx_self.append(inv_idx)
@@ -288,9 +289,18 @@ def compute_knn_inverse(pointclouds, edges_self, edges_forward, edges_propagate)
     inverse_k_forward = []
     inverse_idx_forward = []
     for j, edges in enumerate(edges_forward):
-        # For forward edges, total points is number of points in the next level
-        total_points = pointclouds[j+1].shape[1] if j+1 < len(pointclouds) else edges.shape[1]
+        # For forward edges, neighbor indices refer to points in the CURRENT level (dense)
+        # So total_points should be the number of points in the current level, not the next level
+        total_points = pointclouds[j].shape[1]  # CURRENT level (dense) point count
+        
+        print(f"Forward edge level {j}: edges.shape={edges.shape}, total_points={total_points}")
+        print(f"  Current level: {pointclouds[j].shape[1]} points")
+        print(f"  Next level: {pointclouds[j+1].shape[1] if j+1 < len(pointclouds) else 'N/A'} points")
+        
         inv_n, inv_k, inv_idx = pcf_cuda.compute_knn_inverse(edges, total_points)
+        
+        print(f"  Result: inv_idx.shape={inv_idx.shape} (should be [B, {total_points + 1}])")
+        
         inverse_neighbors_forward.append(inv_n)
         inverse_k_forward.append(inv_k)
         inverse_idx_forward.append(inv_idx)
@@ -300,7 +310,8 @@ def compute_knn_inverse(pointclouds, edges_self, edges_forward, edges_propagate)
     inverse_idx_propagate = []
     for j, edges in enumerate(edges_propagate):
         # For propagate edges, total points is number of points in the current level
-        inv_n, inv_k, inv_idx = pcf_cuda.compute_knn_inverse(edges, pointclouds[j].shape[1])
+        total_points = pointclouds[j].shape[1]  # Current level point count
+        inv_n, inv_k, inv_idx = pcf_cuda.compute_knn_inverse(edges, total_points)
         inverse_neighbors_propagate.append(inv_n)
         inverse_k_propagate.append(inv_k)
         inverse_idx_propagate.append(inv_idx)
