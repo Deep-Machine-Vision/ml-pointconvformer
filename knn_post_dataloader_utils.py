@@ -7,7 +7,6 @@ def knn_keops(ref_points, query_points, K):
     """
     Compute k-nearest neighbors using KeOps, and return indices.
     """
-    
     if isinstance(ref_points, np.ndarray):
         ref_points = torch.tensor(ref_points, dtype=torch.float32)
     if isinstance(query_points, np.ndarray):
@@ -39,15 +38,17 @@ def compute_knn(ref_points, query_points, K, dilated_rate=1, method='keops'):
     """
     num_ref_points = ref_points.shape[0]
 
+
     if num_ref_points < K or num_ref_points < dilated_rate * K:
         num_query_points = query_points.shape[0]
         inds = np.random.choice(
             num_ref_points, (num_query_points, K)).astype(
             np.int32)
-
+        # Convert to torch tensor if ref_points is a torch tensor
+        if isinstance(ref_points, torch.Tensor):
+            inds = torch.tensor(inds).to(ref_points.device)
         return inds
     if method == 'sklearn':
-        print("Using sklearn")
         kdt = KDTree(ref_points)
         neighbors_idx = kdt.query(
             query_points,
