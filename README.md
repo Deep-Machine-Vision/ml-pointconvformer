@@ -61,8 +61,10 @@ setup.sh
 6. Run ```sh run_distributed.sh num_gpus config_file_name``` to train the model with num_gpus GPUs, or python train_ScanNet_DDP_WarmUP.py --config configPCF_10cm.yaml to train the model with a single GPU.
 
 7. To enable GPU-based KNN computation, set `post_knn: true` in the configuration file. Refer to [`train_ScanNet_DDP_WarmUP.py`](./train_ScanNet_DDP_WarmP.py) for an example implementation, Load data (`features`, `pointclouds`, `target`, `norms`, `points_stored`), Compute kNN edges using `compute_knn_packed()`, Prepare edges for further processing using `prepare()`
+    For the 'keops' method, one needs to install keops by `pip install pykeops`.
+    For the 'brute_force' method, one needs to [install cuvs](https://docs.rapids.ai/api/cuvs/nightly/build/).
 
-8. To enable optimized PointConv CUDA kernels for saving peak GPU memory usage, set `USE_CUDA_KERNEL: True` and `PCONV_OPT: True` in the configuration file. Refer to ['configPCF_Opt_10cm.yaml'](./configs/configPCF_Opt_10cm.yaml). Use the fused PointConv and Linear layer CUTLASS forward and fused CUDA backward kernels, Compute kNN Inverse mapping indices for all the edges, use the inverse indices in the backward kernel to compute gradients.
+9. To enable optimized PointConv CUDA kernels for saving peak GPU memory usage, set `USE_CUDA_KERNEL: True` and `PCONV_OPT: True` in the configuration file. Refer to ['configPCF_Opt_10cm.yaml'](./configs/configPCF_Opt_10cm.yaml). Use the fused PointConv and Linear layer CUTLASS forward and fused CUDA backward kernels, Compute kNN Inverse mapping indices for all the edges, use the inverse indices in the backward kernel to compute gradients.
 
 ### Evaluation
 
@@ -83,3 +85,4 @@ configuration and a configuration file configPCF_2cm_PTF2.yaml is also provided 
 (grid size, mix3D augmentation), which is cheaper than the main one reported in the paper yet still achieves a comparable 74.4% mIOU on the ScanNet validation set.
 
 Besides, in model_architecture.py we have provided a few default models such as PCF_Tiny, PCF_Small, PCF_Normal and PCF_Large, which can serve for different scenarios.
+
