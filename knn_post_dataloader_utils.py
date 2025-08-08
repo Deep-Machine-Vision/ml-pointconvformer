@@ -16,7 +16,7 @@ def knn_cuvs_brute_force(ref_points, query_points, K):
     index = brute_force.build(ref_points, metric='sqeuclidean')
 
     dist, ind = brute_force.search(index, query_points, K)
-    ind = cp.asnumpy(ind)
+    ind = cp.asarray(ind)
     return ind
 
 def knn_keops(ref_points, query_points, K):
